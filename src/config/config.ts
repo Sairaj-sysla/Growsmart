@@ -2,8 +2,7 @@
 // CONFIG MANAGER (Enterprise Grade) WITH .env SUPPORT
 // ============================================================================
 
-import dotenv from "dotenv";
-dotenv.config();  // Load .env variables
+
 
 export class ConfigManager {
   private static instance: ConfigManager;
