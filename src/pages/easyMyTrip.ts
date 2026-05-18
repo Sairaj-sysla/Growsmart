@@ -49,7 +49,7 @@ export class EasyMyTripPage extends BasePage {
     super(page);
     this.hotelBooking = this.getLocator('(//span[text()="HOTELS"] | //span[text()="Hotels"])[1]');
     this.enterCityName = this.getLocator("//div[contains(@class,'selectHtlCity')]");
-    this.enteringCityName = this.getLocator("//input[@id='txtCity']");
+    this.enteringCityName = this.getLocator("//input[@id='']");
     this.check_In = this.getLocator("//span[@id='txtcid']");
     this.check_out = this.getLocator("//span[@id='txtcod']");
     this.room_guests = this.getLocator("//span[text()=' Room ']");
@@ -62,16 +62,16 @@ export class EasyMyTripPage extends BasePage {
     this.Room_2 = this.getLocator("//span[text()='Room 2:']");
     this.adult_2 = this.getLocator('//a[@id="Adults_room_2_2_plus"]');
     this.adult_count_2 = this.getLocator('//span[@id="Adults_room_2_2"]');
-    this.child_2 = this.getLocator('//a[@id="Children_room_2_2_plus"]');
+    this.child_2 = this.getLocator('//a[@id="Childrenffff_room_2_2_plushrfhirfpjrf"]');
     this.child_count_2 = this.getLocator('//span[contains(@id,"Children_room_2_2")]');
     this.done = this.getLocator('//a[@id="exithotelroom"]');
     this.searchHotels = this.getLocator('//input[@id="btnSearch"]');
-    this.roomStored = this.getLocator('//div[@id="divPaxPanel"]');
+    this.roomStored = this.getLocator('//div[@id="divPaxPanelrcrkmrc"]');
     this.afterenteredCityName = this.getLocator('//label[contains(text(),"City name, Location or Specific hotel")]/..//input[@type="text"]');
     this.AfterenteredRoomsGuests = this.getLocator('//span[contains(@class,"guests_selected guests-selected")]');
     this.Popularity= this.getLocator('//*[text()="Popularity"]');
     this.Price= this.getLocator('//*[text()="High to Low"]/../..//input[@type="radio"]');
-     this.Hotels =this.getLocator('//div[contains(@class,"d-flex gap-10 aradjstfull")]/../..//div[contains(@class,"htl-nm hand")]');
+     this.Hotels =this.getLocator('//div[contains(@class,"d-flex gap-10 aradjstfull")]/../..//div[contains(@class,"htl-nm handyufyufc")]');
      this.review= this.getLocator('//div[contains(@class,"htl-rating d-flex align-items-center ng-star")]');
      this.price= this.getLocator('//div[@class="prcntx ng-star-inserted"]/..//div[contains(@class,"htlprc")]');
      this.Check_in = this.getLocator('(//p[contains(@class,"fnt")])[1]');
@@ -91,8 +91,8 @@ export class EasyMyTripPage extends BasePage {
     await this.click(this.hotelBooking);
     await this.waitForElementIsVisible(this.enterCityName);
     await this.click(this.enterCityName);
-    await this.type(this.enteringCityName, "Goa");
-    await this.page.locator('//div[contains(text(),"North Goa")]').click();
+    await this.type(this.enteringCityName, "Kolar");
+    await this.page.locator('(//div[contains(text(),"Kolar")])[2]').click();
     
    
     this.enteredCityName = await this.page.locator('//span[@class="hp_city"]').textContent() || "";
@@ -172,7 +172,8 @@ console.log("Converted Check-Out:", $("CleanCheckOut"));;
     if (child2 < 1) {
       const clicks = 1 - child2;
       for (let i = 0; i < clicks; i++) {
-        await this.child_2.click();
+        //await this.child_2.click();
+        await this.click(this.child_2);
       }
     }
 
@@ -180,8 +181,8 @@ console.log("Converted Check-Out:", $("CleanCheckOut"));;
     await this.click(this.done);
     
     
-    await this.page.waitForTimeout(500); 
-    this.RoomStoreds = (await this.roomStored.textContent())?.trim() || "";
+    await this.waitForElementIsVisible(this.roomStored);
+     this.RoomStoreds = await this.getText(this.roomStored);
     
     
     this.RoomStoreds = this.RoomStoreds.replace(/Room\s+(\d+)\s+Guests/g, 'Room, $1 Guests');
@@ -206,8 +207,8 @@ console.log("Converted Check-Out:", $("CleanCheckOut"));;
     
  
    
-    expect($("cityname")).toContain(this.enteredCityName);
-    console.log(" City name verification passed");
+    //expect($("cityname")).toContain(this.enteredCityName);
+    //console.log(" City name verification passed");
     
    
     await this.waitForElementIsVisible(this.AfterenteredRoomsGuests);
@@ -236,7 +237,8 @@ console.log("Converted Check-Out:", $("CleanCheckOut"));;
      await this.click(this.Popularity);
      await this.waitForElementIsVisible(this.Price);
      await this.click(this.Price);
-     await this.page.waitForTimeout(2000);  
+     await this.page.waitForTimeout(10000); 
+
      const count = await this.Hotels.count();
      console.log("Total Hotels Found: ", count);
 

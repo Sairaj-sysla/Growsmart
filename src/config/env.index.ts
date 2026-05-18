@@ -1,11 +1,10 @@
-// src/config/env.index.ts
-import * as dotenv from "dotenv";
+// src/config/env.index.ts//
+
 import { devConfig } from "./env.dev";
 import { qaConfig } from "./env.qa";
 import { AppConfigSchema } from "./env.schema";
 import type { AppConfig, Environment, TimeoutKeys } from "./types";
 
-dotenv.config(); // Load .env
 
 const configs: Record<Environment, AppConfig> = {
   dev: devConfig,

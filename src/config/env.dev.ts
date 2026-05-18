@@ -11,8 +11,8 @@ export const devConfig: AppConfig = {
   },
 
   timeouts: {
-    action: 60000,
-    wait: 60000,
+    action: 30000,
+    wait: 30000,
     navigation: 40000,
   },
 

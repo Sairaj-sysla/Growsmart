@@ -9,3 +9,18 @@ ENV=local
 
 # OPTIONAL: manual token
 MANUAL_TOKEN=
+
+# ======================================
+# AUTO-HEAL SETTINGS
+# ======================================
+
+# Set true to persist element fingerprints to .heal-cache.json
+# across test runs — required for healing to work when locators
+# change between runs
+HEAL_PERSIST_CACHE=true
+
+# Set false to disable AI healing (rule-based still runs)
+AI_HEAL_ENABLED=false
+
+# Set true to see verbose auto-heal debug logs
+DEBUG_LOGS=false

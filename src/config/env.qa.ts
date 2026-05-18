@@ -2,7 +2,7 @@ import type { AppConfig } from "./types";
 
 export const qaConfig: AppConfig = {
   env: "qa",
-  baseURL: "https://showcase.bluecopa.com/welcome",
+  baseURL: "https://www.easemytrip.com/",
   easyURL : "https://www.easemytrip.com/",
 
   credentials: {
@@ -11,9 +11,9 @@ export const qaConfig: AppConfig = {
   },
 
   timeouts: {
-    action: 60000,
-    wait: 60000,
-    navigation: 45000,
+    action: 30000,
+    wait: 30000,
+    navigation: 30000,
   },
 
   browser: {

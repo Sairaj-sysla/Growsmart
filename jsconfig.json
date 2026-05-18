@@ -1,15 +1,40 @@
 {
   "compilerOptions": {
-    "target": "ESNext",
+    "target": "ES2020",
     "module": "commonjs",
-    "lib": ["ESNext", "DOM"],
-    "moduleResolution": "node",
+    "lib": ["ES2020", "DOM"],
+    "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": false,
     "skipLibCheck": true,
     "esModuleInterop": true,
     "allowJs": false,
-    "strict": false,
-    "baseUrl": "./"
-  }
+
+    // Strict mode ON — catches real bugs early
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "sourceMap": true,
+    "declaration": true,
+    "declarationMap": true,
+
+    "paths": {
+      "@pages/*":    ["./src/pages/*"],
+      "@utils/*":    ["./src/utils/*"],
+      "@fixtures/*": ["./src/fixtures/*"],
+      "@tests/*":    ["./src/tests/*"]
+    },
+
+    "types": ["node"]
+  },
+
+  "include": ["src/**/*.ts"],
+
+  "exclude": ["node_modules", "dist"]
 }

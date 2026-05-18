@@ -1,12 +1,44 @@
 // ============================================================================
 //  BASE PAGE - ENTERPRISE LEVEL
-//  - Central abstraction for all page actions
-//  - Auto-name logging for elements
-//  - ErrorHandler wrapper + inner try/catch in all methods
-//  - Uses ElementUtils, WaitUtils, Runtime store helpers
+// ----------------------------------------------------------------------------
+//  HOW IT WORKS:
+//  ------------
+//  BasePage is the foundation for ALL page objects in this framework.
+//
+//  FLOW:
+//  Test → PageObject.someAction() → BasePage.click() → ElementUtils.click()
+//                                                     → RetryUtils.retry()
+//                                                     → ErrorHandler.handle()
+//
+//  LAYERS:
+//  ┌─────────────────────────────────┐
+//  │  Test File (.spec.ts)           │  ← calls page object methods
+//  ├─────────────────────────────────┤
+//  │  Page Object (LoginPage, etc.)  │  ← extends BasePage
+//  ├─────────────────────────────────┤
+//  │  BasePage (this file)           │  ← wraps all actions with logging
+//  ├─────────────────────────────────┤
+//  │  ElementUtils / WaitUtils       │  ← low-level Playwright wrappers
+//  ├─────────────────────────────────┤
+//  │  RetryUtils / ErrorHandler      │  ← retry + error capture
+//  └─────────────────────────────────┘
+//
+//  AUTO-HEAL COVERAGE:
+//  -------------------
+//  ✔ click / fill / type          → via ElementUtils (always)
+//  ✔ doubleClick / rightClick     → direct autoHeal call
+//  ✔ hover / focus / press        → direct autoHeal call
+//  ✔ check / uncheck              → direct autoHeal call
+//  ✔ selectOption                 → direct autoHeal call
+//  ✔ waitForElementIsVisible      → heals before waiting
+//  ✔ waitForElementToDisappear    → heals before waiting
+//  ✔ waitForElementEnabled        → heals before checking
+//  ✔ getText                      → heals before reading
+//  ✔ getInputValue                → heals before reading
+//  ✔ scrollToElement              → heals before scrolling
 // ============================================================================
 
-import { Page, Locator, expect } from "@playwright/test";
+import { Page, Locator, FrameLocator, expect } from "@playwright/test";
 import { ElementUtils } from "../utils/elementUtils";
 import { WaitUtils } from "../utils/waitUtils";
 import { ErrorHandler } from "../utils/errorHandler";
@@ -14,48 +46,13 @@ import { RetryOptions } from "../utils/retryUtils";
 import { configManager } from "../config/env.index";
 import { Global_Timeout } from "../config/globalTimeout";
 import { Runtime } from "../utils/runtimeStore";
+import { logger } from "../utils/logger";
+import { autoHeal } from "../utils/autoHeal";
 
-/**
- * BasePage
- * ---------------------------------------------------------------------------
- * Enterprise-level reusable base class for all Page Objects.
- *
- * Responsibilities:
- *  - Normalize selectors (string or Locator) into Locator
- *  - Provide auto element-name resolution for logging
- *  - Wrap all core actions with ErrorHandler + inner try/catch
- *  - Provide consistent timeouts using Global_Timeout
- *  - Provide helper methods for storing values in Runtime store
- *
- * Usage:
- *  export class LoginPage extends BasePage {
- *    readonly username = this.getLocator("#username");
- *    readonly password = this.getLocator("#password");
- *    readonly loginBtn = this.getLocator("button[type='submit']");
- *
- *    async login(user: string, pass: string) {
- *      return this
- *        .fill(this.username, user)
- *        .fill(this.password, pass)
- *        .click(this.loginBtn)
- *        .waitForURL(/dashboard/);
- *    }
- *  }
- */
 export class BasePage {
   protected page: Page;
+  private _currentFrame: FrameLocator | null = null;
 
-  // ==========================================================================
-  //  CONSTRUCTOR
-  // ==========================================================================
-
-  /**
-   * Constructor
-   *
-   * Stores the Playwright Page instance for use in all actions.
-   *
-   * @param page - Playwright Page instance
-   */
   constructor(page: Page) {
     this.page = page;
   }
@@ -64,156 +61,63 @@ export class BasePage {
   //  SELECTOR NORMALIZATION + AUTO-NAME
   // ==========================================================================
 
-  /**
-   * getLocator
-   * -------------------------------------------------------------------------
-   * Converts a string selector or existing Locator into a Locator.
-   *
-   * Behavior:
-   *  - If selector is already a Locator → returns it as-is
-   *  - If string starts with '//' or 'xpath=' → treats as XPath
-   *  - Otherwise → treats as CSS
-   *
-   * @param selector - string selector or Locator
-   * @returns Locator
-   */
   protected getLocator(selector: string | Locator): Locator {
     try {
       if (typeof selector !== "string") return selector;
-
       if (selector.startsWith("//") || selector.startsWith("xpath=")) {
         return this.page.locator(`xpath=${selector.replace("xpath=", "")}`);
       }
-
       return this.page.locator(selector);
     } catch (error: any) {
-      console.error("Error in getLocator");
-      console.error(`Selector: ${selector}`);
-      console.error(`Error: ${error.message}`);
-      throw new Error(
-        `getLocator failed for selector: ${selector} → ${error.message}`
-      );
+      logger.error(`getLocator failed → ${selector} → ${error.message}`);
+      throw new Error(`getLocator failed → ${selector} → ${error.message}`);
     }
   }
 
-  /**
-   * getElementName
-   * -------------------------------------------------------------------------
-   * Derives a human-readable element name for logging and debugging.
-   *
-   * Strategy:
-   *  1. If explicitLabel is provided → return it.
-   *  2. For Locator:
-   *      - Try to map to this.<property> reference
-   *      - Fallback to parsing locator.toString()
-   *  3. For string selector:
-   *      - Use extractLabelFromSelector
-   *
-   * @param selector - Locator or string selector
-   * @param explicitLabel - optional manual name
-   * @returns element name for logs
-   */
-  protected getElementName(
-    selector: string | Locator,
-    explicitLabel?: string
-  ): string {
+  protected getElementName(selector: string | Locator, explicitLabel?: string): string {
     if (explicitLabel) return explicitLabel;
-
     try {
       if (typeof selector !== "string") {
-        // Try to map locator to a property on the Page Object
         try {
           for (const key of Object.getOwnPropertyNames(this)) {
-            if ((this as any)[key] === selector) {
-              return key;
-            }
+            if ((this as any)[key] === selector) return key;
           }
-        } catch {
-          // ignore
-        }
-
-        // Fallback to locator.toString() analysis
+        } catch { /* ignore */ }
         try {
-          const locAsString = selector.toString();
-
-          const roleMatch = locAsString.match(/getByRole\((.*?)\)/);
-          if (roleMatch) {
-            return roleMatch[1].replace(/["{}]/g, "").trim();
-          }
-
-          const textMatch = locAsString.match(/getByText\((.*?)\)/);
-          if (textMatch) {
-            return `text=${textMatch[1].replace(/["]/g, "")}`;
-          }
-
-          const testIdMatch = locAsString.match(/getByTestId\((.*?)\)/);
-          if (testIdMatch) {
-            return `testId=${testIdMatch[1].replace(/["]/g, "")}`;
-          }
-
-          const cssMatch = locAsString.match(/locator\("([^"]+)"\)/);
-          if (cssMatch) {
-            return this.extractLabelFromSelector(cssMatch[1]);
-          }
-
-          const xpathMatch = locAsString.match(/locator\('xpath=(.*?)'\)/);
-          if (xpathMatch) {
-            return this.extractLabelFromSelector(xpathMatch[1]);
-          }
-        } catch {
-          // ignore
-        }
-
+          const s = selector.toString();
+          const roleMatch  = s.match(/getByRole\((.*?)\)/);
+          const textMatch  = s.match(/getByText\((.*?)\)/);
+          const testMatch  = s.match(/getByTestId\((.*?)\)/);
+          const cssMatch   = s.match(/locator\("([^"]+)"\)/);
+          const xpathMatch = s.match(/locator\('xpath=(.*?)'\)/);
+          if (roleMatch)  return roleMatch[1].replace(/["{}]/g, "").trim();
+          if (textMatch)  return `text=${textMatch[1].replace(/["]/g, "")}`;
+          if (testMatch)  return `testId=${testMatch[1].replace(/["]/g, "")}`;
+          if (cssMatch)   return this.extractLabelFromSelector(cssMatch[1]);
+          if (xpathMatch) return this.extractLabelFromSelector(xpathMatch[1]);
+        } catch { /* ignore */ }
         return "UnknownElement";
       }
-
       return this.extractLabelFromSelector(selector);
     } catch (error: any) {
-      console.error(`Error in getElementName: ${error.message}`);
+      logger.error(`getElementName failed: ${error.message}`);
       return "UnknownElement";
     }
   }
 
-  /**
-   * extractLabelFromSelector
-   * -------------------------------------------------------------------------
-   * Converts a low-level selector string into a short label.
-   *
-   * Examples:
-   *  - "#loginBtn"           → "loginBtn"
-   *  - ".menu-item.active"   → "menu-item-active"
-   *  - "//div[@id='main']"   → "div-id-main"
-   *
-   * @param selector - raw CSS or XPath selector
-   * @returns readable label
-   */
   private extractLabelFromSelector(selector: string): string {
     try {
-      let clean = selector
-        .replace(/^css=/, "")
-        .replace(/^xpath=/, "")
-        .trim();
-
+      let clean = selector.replace(/^css=/, "").replace(/^xpath=/, "").trim();
       if (clean.startsWith("#")) return clean.slice(1);
       if (clean.startsWith(".")) return clean.replace(/\./g, "-");
-
       const textMatch = clean.match(/text\((.*?)\)|text=['"](.*?)['"]/);
-      if (textMatch) {
-        const t = textMatch[1] || textMatch[2];
-        return t.trim().replace(/\s+/g, "_");
-      }
-
+      if (textMatch) return (textMatch[1] || textMatch[2]).trim().replace(/\s+/g, "_");
       if (clean.startsWith("//") || clean.includes("@")) {
-        return clean
-          .replace(/[^a-zA-Z0-9]+/g, "-")
-          .replace(/-+/g, "-")
-          .replace(/^-|-$/g, "")
-          .substring(0, 30);
+        return clean.replace(/[^a-zA-Z0-9]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").substring(0, 30);
       }
-
       return clean.substring(0, 30);
     } catch (error: any) {
-      console.error(`Error in extractLabelFromSelector: ${error.message}`);
+      logger.error(`extractLabelFromSelector failed: ${error.message}`);
       return "unknown-selector";
     }
   }
@@ -222,1961 +126,1243 @@ export class BasePage {
   //  NAVIGATION
   // ==========================================================================
 
-  /**
-   * navigateTo
-   * -------------------------------------------------------------------------
-   * Navigate to a full URL (absolute).
-   *
-   * Implementation:
-   *  - Calls page.goto(url) with waitUntil "domcontentloaded"
-   *  - Then waits for "networkidle" using WaitUtils
-   *  - Wrapped in ErrorHandler.handle for retry + safe error
-   *
-   * Example:
-   *  await this.navigateTo("https://example.com/login");
-   *
-   * @param url - absolute URL
-   * @returns this
-   */
   async navigateTo(url: string): Promise<this> {
-    console.log(`Navigate To → ${url}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.page.goto(url, {
-            waitUntil: "domcontentloaded",
-            timeout: Global_Timeout.navigation,
-          });
-
-          await WaitUtils.waitForLoadState(
-            this.page,
-            "networkidle",
-            Global_Timeout.navigation
-          );
-
-          console.log(`Successfully navigated to → ${url}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Failed to navigate to URL: ${url}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(`navigateTo failed → ${url} → ${error.message}`);
-        }
-      },
-      { context: `BasePage.navigateTo (${url})` }
-    );
+    logger.step(`Navigate To → ${url}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: Global_Timeout.navigation });
+        await WaitUtils.waitForLoadState(this.page, "networkidle", Global_Timeout.navigation);
+        logger.pass(`Navigated to → ${url}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`navigateTo failed → ${url} → ${error.message}`);
+        throw new Error(`navigateTo failed → ${url} → ${error.message}`);
+      }
+    }, { context: `BasePage.navigateTo (${url})` });
   }
 
-  /**
-   * goto
-   * -------------------------------------------------------------------------
-   * Navigate using baseURL from configManager + relative path.
-   *
-   * Example:
-   *  await this.goto("/dashboard");
-   *
-   * @param path - relative path, default "/"
-   * @returns this
-   */
   async goto(path = "/"): Promise<this> {
     const fullUrl = `${configManager.getBaseURL()}${path}`;
-    console.log(`Goto → ${fullUrl}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.navigateTo(fullUrl);
-          return this;
-        } catch (error: any) {
-          console.error(`Failed in goto(${path})`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(`goto failed → ${path} → ${error.message}`);
-        }
-      },
-      { context: `BasePage.goto (${path})` }
-    );
+    logger.step(`Goto → ${fullUrl}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await this.navigateTo(fullUrl);
+        return this;
+      } catch (error: any) {
+        logger.error(`goto failed → ${path} → ${error.message}`);
+        throw new Error(`goto failed → ${path} → ${error.message}`);
+      }
+    }, { context: `BasePage.goto (${path})` });
   }
 
-  /**
-   * reload
-   * -------------------------------------------------------------------------
-   * Reload the current page.
-   *
-   * Example:
-   *  await this.reload();
-   *
-   * @returns this
-   */
   async reload(): Promise<this> {
-    console.log("Reload Page");
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.page.reload({ waitUntil: "domcontentloaded" });
-          console.log("Page reloaded successfully");
-          return this;
-        } catch (error: any) {
-          console.error("Failed to reload page");
-          console.error(`Error: ${error.message}`);
-          throw new Error(`reload failed → ${error.message}`);
-        }
-      },
-      { context: "BasePage.reload" }
-    );
+    logger.step("Reload Page");
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await this.page.reload({ waitUntil: "domcontentloaded" });
+        logger.pass("Page reloaded");
+        return this;
+      } catch (error: any) {
+        logger.error(`reload failed → ${error.message}`);
+        throw new Error(`reload failed → ${error.message}`);
+      }
+    }, { context: "BasePage.reload" });
   }
 
-  /**
-   * goBack
-   * -------------------------------------------------------------------------
-   * Browser back navigation.
-   *
-   * Example:
-   *  await this.goBack();
-   *
-   * @returns this
-   */
   async goBack(): Promise<this> {
-    console.log("Go Back");
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.page.goBack({ waitUntil: "domcontentloaded" });
-          console.log("Navigation back successful");
-          return this;
-        } catch (error: any) {
-          console.error("Failed to go back");
-          console.error(`Error: ${error.message}`);
-          throw new Error(`goBack failed → ${error.message}`);
-        }
-      },
-      { context: "BasePage.goBack" }
-    );
+    logger.step("Go Back");
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await this.page.goBack({ waitUntil: "domcontentloaded" });
+        logger.pass("Navigation back successful");
+        return this;
+      } catch (error: any) {
+        logger.error(`goBack failed → ${error.message}`);
+        throw new Error(`goBack failed → ${error.message}`);
+      }
+    }, { context: "BasePage.goBack" });
   }
 
-  /**
-   * goForward
-   * -------------------------------------------------------------------------
-   * Browser forward navigation.
-   *
-   * Example:
-   *  await this.goForward();
-   *
-   * @returns this
-   */
   async goForward(): Promise<this> {
-    console.log("Go Forward");
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.page.goForward({ waitUntil: "domcontentloaded" });
-          console.log("Navigation forward successful");
-          return this;
-        } catch (error: any) {
-          console.error("Failed to go forward");
-          console.error(`Error: ${error.message}`);
-          throw new Error(`goForward failed → ${error.message}`);
-        }
-      },
-      { context: "BasePage.goForward" }
-    );
+    logger.step("Go Forward");
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await this.page.goForward({ waitUntil: "domcontentloaded" });
+        logger.pass("Navigation forward successful");
+        return this;
+      } catch (error: any) {
+        logger.error(`goForward failed → ${error.message}`);
+        throw new Error(`goForward failed → ${error.message}`);
+      }
+    }, { context: "BasePage.goForward" });
   }
 
   // ==========================================================================
-  //  ELEMENT ACTIONS
+  //  ELEMENT ACTIONS — all with auto-heal via ElementUtils or direct autoHeal
   // ==========================================================================
 
-  /**
-   * click
-   * -------------------------------------------------------------------------
-   * Clicks on an element using ElementUtils.click with retries and timeouts.
-   *
-   * Example:
-   *  await this.click(this.loginBtn, { label: "Login Button" });
-   *
-   * @param selector - Locator or string selector
-   * @param options - force, label, retryOptions
-   * @returns this
-   */
   async click(
     selector: string | Locator,
-    options?: {
-      force?: boolean;
-      label?: string;
-      retryOptions?: RetryOptions;
-    }
+    options?: { force?: boolean; label?: string; retryOptions?: RetryOptions }
   ): Promise<this> {
     const name = this.getElementName(selector, options?.label);
-    console.log(`Click → ${name}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await ElementUtils.click(this.getLocator(selector), {
-            timeout: Global_Timeout.action,
-            ...options,
-            label: name,
-          });
-          console.log(`Successfully clicked → ${name}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Failed to click element: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(`click failed → ${name} → ${error.message}`);
-        }
-      },
-      { context: `BasePage.click (${name})` }
-    );
+    logger.debug(`Click → ${name}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        // ── Auto-heal via ElementUtils ────────────────────────────────────
+        await ElementUtils.click(this.getLocator(selector), { timeout: Global_Timeout.action, ...options, label: name });
+        logger.pass(`Clicked → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`click failed → ${name} → ${error.message}`);
+        throw new Error(`click failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.click (${name})` });
   }
 
-  /**
-   * doubleClick
-   * -------------------------------------------------------------------------
-   * Performs a double-click on the given element.
-   *
-   * Example:
-   *  await this.doubleClick(this.rowItem);
-   *
-   * @param selector - Locator or string selector
-   * @returns this
-   */
   async doubleClick(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    console.log(`Double Click → ${name}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.getLocator(selector).dblclick({
-            timeout: Global_Timeout.action,
-          });
-          console.log(`Successfully double-clicked → ${name}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Failed to double-click element: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(`doubleClick failed → ${name} → ${error.message}`);
-        }
-      },
-      { context: `BasePage.doubleClick (${name})` }
-    );
+    logger.debug(`Double Click → ${name}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        // ── Auto-heal direct ──────────────────────────────────────────────
+        const { locator: healed, healed: wasHealed, strategy } =
+          await autoHeal(this.getLocator(selector), Global_Timeout.action);
+        if (wasHealed) logger.warn(`[AutoHeal] doubleClick healed via [${strategy}] → ${name}`);
+        await healed.dblclick({ timeout: Global_Timeout.action });
+        logger.pass(`Double-clicked → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`doubleClick failed → ${name} → ${error.message}`);
+        throw new Error(`doubleClick failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.doubleClick (${name})` });
   }
 
-  /**
-   * rightClick
-   * -------------------------------------------------------------------------
-   * Performs a right-click on the given element.
-   *
-   * Example:
-   *  await this.rightClick(this.contextMenuTarget);
-   *
-   * @param selector - Locator or string selector
-   * @returns this
-   */
   async rightClick(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    console.log(`Right Click → ${name}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.getLocator(selector).click({
-            button: "right",
-            timeout: Global_Timeout.action,
-          });
-          console.log(`Successfully right-clicked → ${name}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Failed to right-click element: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(`rightClick failed → ${name} → ${error.message}`);
-        }
-      },
-      { context: `BasePage.rightClick (${name})` }
-    );
+    logger.debug(`Right Click → ${name}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        const { locator: healed, healed: wasHealed, strategy } =
+          await autoHeal(this.getLocator(selector), Global_Timeout.action);
+        if (wasHealed) logger.warn(`[AutoHeal] rightClick healed via [${strategy}] → ${name}`);
+        await healed.click({ button: "right", timeout: Global_Timeout.action });
+        logger.pass(`Right-clicked → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`rightClick failed → ${name} → ${error.message}`);
+        throw new Error(`rightClick failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.rightClick (${name})` });
   }
 
-  /**
-   * fill
-   * -------------------------------------------------------------------------
-   * Clears and fills an input field using ElementUtils.fill.
-   *
-   * Example:
-   *  await this.fill(this.username, "admin");
-   *
-   * @param selector - Locator or string selector
-   * @param text - text to fill
-   * @param options - label, retryOptions
-   * @returns this
-   */
   async fill(
     selector: string | Locator,
     text: string,
-    options?: {
-      label?: string;
-      retryOptions?: RetryOptions;
-    }
+    options?: { label?: string; retryOptions?: RetryOptions }
   ): Promise<this> {
     const name = this.getElementName(selector, options?.label);
-    console.log(`Fill → ${name} | Value: ${text}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await ElementUtils.fill(this.getLocator(selector), text, {
-            timeout: Global_Timeout.action,
-            ...options,
-            label: name,
-          });
-          console.log(`Successfully filled → ${name}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Failed to fill element: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Value: ${text}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(`fill failed → ${name} → ${error.message}`);
-        }
-      },
-      { context: `BasePage.fill (${name})` }
-    );
+    logger.debug(`Fill → ${name} | Value: "${text}"`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        // ── Auto-heal via ElementUtils ────────────────────────────────────
+        await ElementUtils.fill(this.getLocator(selector), text, { timeout: Global_Timeout.action, ...options, label: name });
+        logger.pass(`Filled → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`fill failed → ${name} → ${error.message}`);
+        throw new Error(`fill failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.fill (${name})` });
   }
 
-  /**
-   * type
-   * -------------------------------------------------------------------------
-   * Types text (character-by-character) using ElementUtils.type.
-   *
-   * Example:
-   *  await this.type(this.searchBox, "Goa", 50);
-   *
-   * @param selector - Locator or string selector
-   * @param text - text to type
-   * @param delay - optional delay between keystrokes
-   * @param options - label, retryOptions
-   * @returns this
-   */
   async type(
     selector: string | Locator,
     text: string,
     delay?: number,
-    options?: {
-      label?: string;
-      retryOptions?: RetryOptions;
-    }
+    options?: { label?: string; retryOptions?: RetryOptions }
   ): Promise<this> {
     const name = this.getElementName(selector, options?.label);
-    console.log(
-      `Type → ${name} | Value: ${text} | Delay: ${delay ?? 0}ms`
-    );
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await ElementUtils.type(this.getLocator(selector), text, {
-            timeout: Global_Timeout.action,
-            delay,
-            ...options,
-            label: name,
-          });
-          console.log(`Successfully typed into → ${name}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Failed to type into element: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Value: ${text}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(`type failed → ${name} → ${error.message}`);
-        }
-      },
-      { context: `BasePage.type (${name})` }
-    );
+    logger.debug(`Type → ${name} | Value: "${text}" | Delay: ${delay ?? 50}ms`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        // ── Auto-heal via ElementUtils ────────────────────────────────────
+        await ElementUtils.type(this.getLocator(selector), text, { timeout: Global_Timeout.action, delay, ...options, label: name });
+        logger.pass(`Typed → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`type failed → ${name} → ${error.message}`);
+        throw new Error(`type failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.type (${name})` });
   }
 
-  /**
-   * clear
-   * -------------------------------------------------------------------------
-   * Clears the content of an input element using ElementUtils.clear.
-   *
-   * Example:
-   *  await this.clear(this.searchBox);
-   *
-   * @param selector - Locator or string selector
-   * @returns this
-   */
   async clear(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    console.log(`Clear → ${name}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await ElementUtils.clear(this.getLocator(selector));
-          console.log(`Successfully cleared → ${name}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Failed to clear element: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(`clear failed → ${name} → ${error.message}`);
-        }
-      },
-      { context: `BasePage.clear (${name})` }
-    );
+    logger.debug(`Clear → ${name}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await ElementUtils.clear(this.getLocator(selector));
+        logger.pass(`Cleared → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`clear failed → ${name} → ${error.message}`);
+        throw new Error(`clear failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.clear (${name})` });
   }
 
-  /**
-   * selectOption
-   * -------------------------------------------------------------------------
-   * Selects an option (or multiple) from a native <select> element.
-   *
-   * Example:
-   *  await this.selectOption(this.countrySelect, "IN");
-   *
-   * @param selector - Locator or string selector
-   * @param value - value or array of values
-   * @returns this
-   */
-  async selectOption(
-    selector: string | Locator,
-    value: string | string[]
-  ): Promise<this> {
+  async selectOption(selector: string | Locator, value: string | string[]): Promise<this> {
     const name = this.getElementName(selector);
-    console.log(`Select Option → ${name} | Value: ${JSON.stringify(value)}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.getLocator(selector).selectOption(value, {
-            timeout: Global_Timeout.action,
-          });
-          console.log(`Successfully selected option → ${name}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Failed to select option: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Value: ${JSON.stringify(value)}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `selectOption failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.selectOption (${name})` }
-    );
+    logger.debug(`Select Option → ${name} | Value: ${JSON.stringify(value)}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        const { locator: healed, healed: wasHealed, strategy } =
+          await autoHeal(this.getLocator(selector), Global_Timeout.action);
+        if (wasHealed) logger.warn(`[AutoHeal] selectOption healed via [${strategy}] → ${name}`);
+        await healed.selectOption(value, { timeout: Global_Timeout.action });
+        logger.pass(`Selected option → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`selectOption failed → ${name} → ${error.message}`);
+        throw new Error(`selectOption failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.selectOption (${name})` });
   }
 
-  /**
-   * check
-   * -------------------------------------------------------------------------
-   * Checks a checkbox or radio button.
-   *
-   * Example:
-   *  await this.check(this.termsCheckbox);
-   *
-   * @param selector - Locator or string selector
-   * @returns this
-   */
   async check(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    console.log(`Check → ${name}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.getLocator(selector).check({
-            timeout: Global_Timeout.action,
-          });
-          console.log(`Successfully checked → ${name}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Failed to check element: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(`check failed → ${name} → ${error.message}`);
-        }
-      },
-      { context: `BasePage.check (${name})` }
-    );
+    logger.debug(`Check → ${name}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        const { locator: healed, healed: wasHealed, strategy } =
+          await autoHeal(this.getLocator(selector), Global_Timeout.action);
+        if (wasHealed) logger.warn(`[AutoHeal] check healed via [${strategy}] → ${name}`);
+        await healed.check({ timeout: Global_Timeout.action });
+        logger.pass(`Checked → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`check failed → ${name} → ${error.message}`);
+        throw new Error(`check failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.check (${name})` });
   }
 
-  /**
-   * uncheck
-   * -------------------------------------------------------------------------
-   * Unchecks a checkbox.
-   *
-   * Example:
-   *  await this.uncheck(this.subscribeCheckbox);
-   *
-   * @param selector - Locator or string selector
-   * @returns this
-   */
   async uncheck(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    console.log(`Uncheck → ${name}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.getLocator(selector).uncheck({
-            timeout: Global_Timeout.action,
-          });
-          console.log(`Successfully unchecked → ${name}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Failed to uncheck element: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(`uncheck failed → ${name} → ${error.message}`);
-        }
-      },
-      { context: `BasePage.uncheck (${name})` }
-    );
+    logger.debug(`Uncheck → ${name}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        const { locator: healed, healed: wasHealed, strategy } =
+          await autoHeal(this.getLocator(selector), Global_Timeout.action);
+        if (wasHealed) logger.warn(`[AutoHeal] uncheck healed via [${strategy}] → ${name}`);
+        await healed.uncheck({ timeout: Global_Timeout.action });
+        logger.pass(`Unchecked → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`uncheck failed → ${name} → ${error.message}`);
+        throw new Error(`uncheck failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.uncheck (${name})` });
   }
 
-  /**
-   * hover
-   * -------------------------------------------------------------------------
-   * Hovers the mouse over the given element.
-   *
-   * Example:
-   *  await this.hover(this.menuItem);
-   *
-   * @param selector - Locator or string selector
-   * @returns this
-   */
   async hover(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    console.log(`Hover → ${name}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.getLocator(selector).hover({
-            timeout: Global_Timeout.action,
-          });
-          console.log(`Successfully hovered → ${name}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Failed to hover over element: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(`hover failed → ${name} → ${error.message}`);
-        }
-      },
-      { context: `BasePage.hover (${name})` }
-    );
+    logger.debug(`Hover → ${name}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        const { locator: healed, healed: wasHealed, strategy } =
+          await autoHeal(this.getLocator(selector), Global_Timeout.action);
+        if (wasHealed) logger.warn(`[AutoHeal] hover healed via [${strategy}] → ${name}`);
+        await healed.hover({ timeout: Global_Timeout.action });
+        logger.pass(`Hovered → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`hover failed → ${name} → ${error.message}`);
+        throw new Error(`hover failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.hover (${name})` });
   }
 
-  /**
-   * focus
-   * -------------------------------------------------------------------------
-   * Sets focus on the given element.
-   *
-   * Example:
-   *  await this.focus(this.searchBox);
-   *
-   * @param selector - Locator or string selector
-   * @returns this
-   */
   async focus(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    console.log(`Focus → ${name}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.getLocator(selector).focus({
-            timeout: Global_Timeout.action,
-          });
-          console.log(`Successfully focused → ${name}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Failed to focus element: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(`focus failed → ${name} → ${error.message}`);
-        }
-      },
-      { context: `BasePage.focus (${name})` }
-    );
+    logger.debug(`Focus → ${name}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        const { locator: healed, healed: wasHealed, strategy } =
+          await autoHeal(this.getLocator(selector), Global_Timeout.action);
+        if (wasHealed) logger.warn(`[AutoHeal] focus healed via [${strategy}] → ${name}`);
+        await healed.focus({ timeout: Global_Timeout.action });
+        logger.pass(`Focused → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`focus failed → ${name} → ${error.message}`);
+        throw new Error(`focus failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.focus (${name})` });
   }
 
-  /**
-   * press
-   * -------------------------------------------------------------------------
-   * Presses a keyboard key (e.g., "Enter") on the element.
-   *
-   * Example:
-   *  await this.press(this.searchBox, "Enter");
-   *
-   * @param selector - Locator or string selector
-   * @param key - key string, e.g. "Enter"
-   * @returns this
-   */
   async press(selector: string | Locator, key: string): Promise<this> {
     const name = this.getElementName(selector);
-    console.log(`Press → ${name} | Key: ${key}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.getLocator(selector).press(key, {
-            timeout: Global_Timeout.action,
-          });
-          console.log(`Successfully pressed key "${key}" on → ${name}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Failed to press key on element: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Key: ${key}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(`press failed → ${name} → ${error.message}`);
-        }
-      },
-      { context: `BasePage.press (${name})` }
-    );
+    logger.debug(`Press → ${name} | Key: "${key}"`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        const { locator: healed, healed: wasHealed, strategy } =
+          await autoHeal(this.getLocator(selector), Global_Timeout.action);
+        if (wasHealed) logger.warn(`[AutoHeal] press healed via [${strategy}] → ${name}`);
+        await healed.press(key, { timeout: Global_Timeout.action });
+        logger.pass(`Pressed "${key}" on → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`press failed → ${name} → ${error.message}`);
+        throw new Error(`press failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.press (${name})` });
   }
 
   // ==========================================================================
-  //  WAIT METHODS
+  //  KEYBOARD & MOUSE (GLOBAL)
+  // ==========================================================================
+
+  async pressKey(key: string): Promise<this> {
+    logger.debug(`Press key → "${key}"`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await this.page.keyboard.press(key);
+        logger.pass(`Key pressed → "${key}"`);
+        return this;
+      } catch (error: any) {
+        logger.error(`pressKey failed → "${key}" → ${error.message}`);
+        throw new Error(`pressKey failed → "${key}" → ${error.message}`);
+      }
+    }, { context: `BasePage.pressKey (${key})` });
+  }
+
+  async typeText(text: string): Promise<this> {
+    logger.debug(`Type text globally → "${text}"`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await this.page.keyboard.type(text);
+        logger.pass(`Typed globally → "${text}"`);
+        return this;
+      } catch (error: any) {
+        logger.error(`typeText failed → ${error.message}`);
+        throw new Error(`typeText failed → ${error.message}`);
+      }
+    }, { context: "BasePage.typeText" });
+  }
+
+  async mouseClick(
+    x: number,
+    y: number,
+    button: "left" | "right" | "middle" = "left",
+    clickCount: number = 1
+  ): Promise<this> {
+    logger.debug(`Mouse click → x=${x}, y=${y} | button=${button} | clicks=${clickCount}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await this.page.mouse.click(x, y, { button, clickCount });
+        logger.pass(`Mouse clicked → x=${x}, y=${y}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`mouseClick failed → ${error.message}`);
+        throw new Error(`mouseClick failed → ${error.message}`);
+      }
+    }, { context: `BasePage.mouseClick (${x}, ${y})` });
+  }
+
+  async mouseMove(x: number, y: number): Promise<this> {
+    logger.debug(`Mouse move → x=${x}, y=${y}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await this.page.mouse.move(x, y);
+        logger.pass(`Mouse moved → x=${x}, y=${y}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`mouseMove failed → ${error.message}`);
+        throw new Error(`mouseMove failed → ${error.message}`);
+      }
+    }, { context: `BasePage.mouseMove (${x}, ${y})` });
+  }
+
+  async dragAndDrop(source: string | Locator, target: string | Locator): Promise<this> {
+    const sourceName = this.getElementName(source);
+    const targetName = this.getElementName(target);
+    logger.debug(`Drag → ${sourceName} to ${targetName}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await this.getLocator(source).dragTo(this.getLocator(target));
+        logger.pass(`Dragged ${sourceName} → ${targetName}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`dragAndDrop failed → ${sourceName} → ${targetName} → ${error.message}`);
+        throw new Error(`dragAndDrop failed → ${sourceName} → ${targetName} → ${error.message}`);
+      }
+    }, { context: `BasePage.dragAndDrop (${sourceName} → ${targetName})` });
+  }
+
+  // ==========================================================================
+  //  NEW TAB / WINDOW HANDLING
+  // ==========================================================================
+
+  async clickAndGetNewTab(selector: string | Locator): Promise<Page> {
+    const name = this.getElementName(selector);
+    logger.step(`Click and get new tab → ${name}`);
+    return ErrorHandler.handle<Page>(async () => {
+      try {
+        const [newPage] = await Promise.all([
+          this.page.context().waitForEvent("page"),
+          this.getLocator(selector).click(),
+        ]);
+        await newPage.waitForLoadState("domcontentloaded");
+        logger.pass(`New tab opened → ${newPage.url()}`);
+        return newPage;
+      } catch (error: any) {
+        logger.error(`clickAndGetNewTab failed → ${name} → ${error.message}`);
+        throw new Error(`clickAndGetNewTab failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.clickAndGetNewTab (${name})` });
+  }
+
+  async switchToTab(index: number): Promise<Page> {
+    logger.step(`Switch to tab → [${index}]`);
+    return ErrorHandler.handle<Page>(async () => {
+      try {
+        const pages = this.page.context().pages();
+        if (index >= pages.length) {
+          throw new Error(`Tab index [${index}] out of range. Found ${pages.length} tab(s).`);
+        }
+        const tab = pages[index];
+        await tab.bringToFront();
+        logger.pass(`Switched to tab [${index}] → ${tab.url()}`);
+        return tab;
+      } catch (error: any) {
+        logger.error(`switchToTab failed → [${index}] → ${error.message}`);
+        throw new Error(`switchToTab failed → [${index}] → ${error.message}`);
+      }
+    }, { context: `BasePage.switchToTab (${index})` });
+  }
+
+  getTabCount(): number {
+    const count = this.page.context().pages().length;
+    logger.debug(`Tab count → ${count}`);
+    return count;
+  }
+
+  // ==========================================================================
+  //  WAIT METHODS — all with auto-heal
   // ==========================================================================
 
   /**
-   * waitForElementIsVisible
-   * -------------------------------------------------------------------------
-   * Waits until the given element is visible using WaitUtils.
-   *
-   * Example:
-   *  await this.waitForElementIsVisible(this.loader, 10000);
-   *
-   * @param selector - Locator or string selector
-   * @param timeout - optional timeout, default Global_Timeout.wait
-   * @returns this
+   * waitForElementIsVisible — waits until element is visible.
+   * ✔ Auto-heals if primary locator fails before waiting.
    */
-  async waitForElementIsVisible(
-    selector: string | Locator,
-    timeout?: number
-  ): Promise<this> {
-    const name = this.getElementName(selector);
+  async waitForElementIsVisible(selector: string | Locator, timeout?: number): Promise<this> {
+    const name     = this.getElementName(selector);
     const waitTime = timeout || Global_Timeout.wait;
-    console.log(`Wait For Visible → ${name} (Timeout: ${waitTime}ms)`);
+    logger.debug(`Wait visible → ${name} (${waitTime}ms)`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        // ── Auto-heal before waiting ──────────────────────────────────────
+        const { locator: healed, healed: wasHealed, strategy } =
+          await autoHeal(this.getLocator(selector), Math.min(3000, waitTime));
+        if (wasHealed) logger.warn(`[AutoHeal] waitForElementIsVisible healed via [${strategy}] → ${name}`);
 
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await WaitUtils.waitForElementIsVisible(
-            this.getLocator(selector),
-            waitTime
-          );
-          console.log(`Element visible → ${name}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Element did not become visible: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Timeout: ${waitTime}ms`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `waitForElementIsVisible failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.waitForElementIsVisible (${name})` }
-    );
+        await WaitUtils.waitForElementIsVisible(healed, waitTime);
+        logger.pass(`Visible → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`waitForElementIsVisible failed → ${name} → ${error.message}`);
+        throw new Error(`waitForElementIsVisible failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.waitForElementIsVisible (${name})` });
   }
 
   /**
-   * waitForElementToDisappear
-   * -------------------------------------------------------------------------
-   * Waits until the given element disappears (hidden or detached).
-   *
-   * Example:
-   *  await this.waitForElementToDisappear(this.loader);
-   *
-   * @param selector - Locator or string selector
-   * @param timeout - optional timeout, default Global_Timeout.wait
-   * @returns this
+   * waitForElementToDisappear — waits until element is hidden/detached.
+   * ✔ Auto-heals if primary locator fails before waiting.
    */
-  async waitForElementToDisappear(
-    selector: string | Locator,
-    timeout?: number
-  ): Promise<this> {
-    const name = this.getElementName(selector);
+  async waitForElementToDisappear(selector: string | Locator, timeout?: number): Promise<this> {
+    const name     = this.getElementName(selector);
     const waitTime = timeout || Global_Timeout.wait;
-    console.log(
-      `Wait For Disappear → ${name} (Timeout: ${waitTime}ms)`
-    );
+    logger.debug(`Wait disappear → ${name} (${waitTime}ms)`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        // ── Auto-heal before waiting for disappearance ────────────────────
+        const { locator: healed, healed: wasHealed, strategy } =
+          await autoHeal(this.getLocator(selector), Math.min(3000, waitTime));
+        if (wasHealed) logger.warn(`[AutoHeal] waitForElementToDisappear healed via [${strategy}] → ${name}`);
 
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await WaitUtils.waitForElementToDisappear(
-            this.getLocator(selector),
-            waitTime
-          );
-          console.log(`Element disappeared → ${name}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Element did not disappear: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Timeout: ${waitTime}ms`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `waitForElementToDisappear failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.waitForElementToDisappear (${name})` }
-    );
+        await WaitUtils.waitForElementToDisappear(healed, waitTime);
+        logger.pass(`Disappeared → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`waitForElementToDisappear failed → ${name} → ${error.message}`);
+        throw new Error(`waitForElementToDisappear failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.waitForElementToDisappear (${name})` });
   }
 
   /**
-   * waitForElementEnabled
-   * -------------------------------------------------------------------------
-   * Waits until the element is enabled using expect().toBeEnabled().
-   *
-   * Example:
-   *  await this.waitForElementEnabled(this.submitBtn);
-   *
-   * @param selector - Locator or string selector
-   * @returns this
+   * waitForElementEnabled — waits until element is enabled.
+   * ✔ Auto-heals if primary locator fails before checking enabled state.
    */
   async waitForElementEnabled(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    console.log(`Wait For Enabled → ${name}`);
+    logger.debug(`Wait enabled → ${name}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        // ── Auto-heal before checking enabled ─────────────────────────────
+        const { locator: healed, healed: wasHealed, strategy } =
+          await autoHeal(this.getLocator(selector), 3000);
+        if (wasHealed) logger.warn(`[AutoHeal] waitForElementEnabled healed via [${strategy}] → ${name}`);
 
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await expect(this.getLocator(selector)).toBeEnabled({
-            timeout: Global_Timeout.wait,
-          });
-          console.log(`Element enabled → ${name}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Element did not become enabled: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `waitForElementEnabled failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.waitForElementEnabled (${name})` }
-    );
+        await expect(healed).toBeEnabled({ timeout: Global_Timeout.wait });
+        logger.pass(`Enabled → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`waitForElementEnabled failed → ${name} → ${error.message}`);
+        throw new Error(`waitForElementEnabled failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.waitForElementEnabled (${name})` });
   }
 
-  /**
-   * waitForURL
-   * -------------------------------------------------------------------------
-   * Waits for the page URL to match the given string or RegExp.
-   *
-   * Example:
-   *  await this.waitForURL(/dashboard/);
-   *
-   * @param url - expected URL or regex
-   * @returns this
-   */
   async waitForURL(url: string | RegExp): Promise<this> {
-    console.log(`Wait For URL → ${url}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.page.waitForURL(url, {
-            timeout: Global_Timeout.navigation,
-          });
-          console.log(`URL matched → ${url}`);
-          return this;
-        } catch (error: any) {
-          console.error(`URL did not match: ${url}`);
-          console.error(`Current URL: ${this.page.url()}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `waitForURL failed → expected: ${url} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.waitForURL (${url})` }
-    );
+    logger.debug(`Wait URL → ${url}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await this.page.waitForURL(url, { timeout: Global_Timeout.navigation });
+        logger.pass(`URL matched → ${url}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`waitForURL failed → expected: ${url} | current: ${this.page.url()}`);
+        throw new Error(`waitForURL failed → expected: ${url} → ${error.message}`);
+      }
+    }, { context: `BasePage.waitForURL (${url})` });
   }
 
-  /**
-   * waitForLoadState
-   * -------------------------------------------------------------------------
-   * Waits for the page to reach a given load state.
-   *
-   * Example:
-   *  await this.waitForLoadState("networkidle");
-   *
-   * @param state - "load" | "domcontentloaded" | "networkidle"
-   * @returns this
-   */
-  async waitForLoadState(
-    state: "load" | "domcontentloaded" | "networkidle" = "load"
-  ): Promise<this> {
-    console.log(`Wait For LoadState → ${state}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.page.waitForLoadState(state, {
-            timeout: Global_Timeout.navigation,
-          });
-          console.log(`LoadState reached → ${state}`);
-          return this;
-        } catch (error: any) {
-          console.error(`LoadState not reached: ${state}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `waitForLoadState failed → ${state} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.waitForLoadState (${state})` }
-    );
+  async waitForLoadState(state: "load" | "domcontentloaded" | "networkidle" = "load"): Promise<this> {
+    logger.debug(`Wait loadState → ${state}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await this.page.waitForLoadState(state, { timeout: Global_Timeout.navigation });
+        logger.pass(`LoadState reached → ${state}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`waitForLoadState failed → ${state} → ${error.message}`);
+        throw new Error(`waitForLoadState failed → ${state} → ${error.message}`);
+      }
+    }, { context: `BasePage.waitForLoadState (${state})` });
   }
 
-  /**
-   * waitForTextOnPage
-   * -------------------------------------------------------------------------
-   * Waits until given text appears anywhere on the page.
-   *
-   * Example:
-   *  await this.waitForTextOnPage("Booking confirmed", 10000);
-   *
-   * @param text - string or RegExp to match
-   * @param timeout - optional timeout
-   * @returns this
-   */
-  async waitForTextOnPage(
-    text: string | RegExp,
-    timeout?: number
-  ): Promise<this> {
+  async waitForTextOnPage(text: string | RegExp, timeout?: number): Promise<this> {
     const waitTime = timeout || Global_Timeout.wait;
-    console.log(`Wait For Text → ${text} (Timeout: ${waitTime}ms)`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await expect(this.page.getByText(text)).toBeVisible({
-            timeout: waitTime,
-          });
-          console.log(`Text appeared → ${text}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Text did not appear: ${text}`);
-          console.error(`Timeout: ${waitTime}ms`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `waitForTextOnPage failed → ${text} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.waitForTextOnPage (${text})` }
-    );
+    logger.debug(`Wait text → "${text}" (${waitTime}ms)`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await expect(this.page.getByText(text)).toBeVisible({ timeout: waitTime });
+        logger.pass(`Text appeared → "${text}"`);
+        return this;
+      } catch (error: any) {
+        logger.error(`waitForTextOnPage failed → "${text}" → ${error.message}`);
+        throw new Error(`waitForTextOnPage failed → ${text} → ${error.message}`);
+      }
+    }, { context: `BasePage.waitForTextOnPage (${text})` });
   }
 
-  /**
-   * waitForTextDisappear
-   * -------------------------------------------------------------------------
-   * Waits until given text disappears from the page.
-   *
-   * Example:
-   *  await this.waitForTextDisappear("Loading...");
-   *
-   * @param text - string or RegExp
-   * @param timeout - optional timeout
-   * @returns this
-   */
-  async waitForTextDisappear(
-    text: string | RegExp,
-    timeout?: number
-  ): Promise<this> {
+  async waitForTextDisappear(text: string | RegExp, timeout?: number): Promise<this> {
     const waitTime = timeout || Global_Timeout.wait;
-    console.log(
-      `Wait For Text Disappear → ${text} (Timeout: ${waitTime}ms)`
-    );
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await expect(this.page.getByText(text)).not.toBeVisible({
-            timeout: waitTime,
-          });
-          console.log(`Text disappeared → ${text}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Text did not disappear: ${text}`);
-          console.error(`Timeout: ${waitTime}ms`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `waitForTextDisappear failed → ${text} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.waitForTextDisappear (${text})` }
-    );
+    logger.debug(`Wait text disappear → "${text}" (${waitTime}ms)`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await expect(this.page.getByText(text)).not.toBeVisible({ timeout: waitTime });
+        logger.pass(`Text disappeared → "${text}"`);
+        return this;
+      } catch (error: any) {
+        logger.error(`waitForTextDisappear failed → "${text}" → ${error.message}`);
+        throw new Error(`waitForTextDisappear failed → ${text} → ${error.message}`);
+      }
+    }, { context: `BasePage.waitForTextDisappear (${text})` });
   }
 
   // ==========================================================================
   //  ASSERTIONS
   // ==========================================================================
 
-  /**
-   * assertElementVisible
-   * -------------------------------------------------------------------------
-   * Asserts that element is visible.
-   *
-   * Example:
-   *  await this.assertElementVisible(this.confirmationMessage);
-   *
-   * @param selector - Locator or string selector
-   * @returns this
-   */
   async assertElementVisible(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    console.log(`Assert Visible → ${name}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await expect(this.getLocator(selector)).toBeVisible({
-            timeout: Global_Timeout.wait,
-          });
-          console.log(`Assertion passed → ${name} is visible`);
-          return this;
-        } catch (error: any) {
-          console.error(`Assertion failed: ${name} is not visible`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `assertElementVisible failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.assertElementVisible (${name})` }
-    );
+    logger.debug(`Assert visible → ${name}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await expect(this.getLocator(selector)).toBeVisible({ timeout: Global_Timeout.wait });
+        logger.pass(`Visible → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`assertElementVisible failed → ${name} → ${error.message}`);
+        throw new Error(`assertElementVisible failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.assertElementVisible (${name})` });
   }
 
-  /**
-   * assertElementHidden
-   * -------------------------------------------------------------------------
-   * Asserts that element is hidden.
-   *
-   * @param selector - Locator or string selector
-   * @returns this
-   */
   async assertElementHidden(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    console.log(`Assert Hidden → ${name}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await expect(this.getLocator(selector)).toBeHidden({
-            timeout: Global_Timeout.wait,
-          });
-          console.log(`Assertion passed → ${name} is hidden`);
-          return this;
-        } catch (error: any) {
-          console.error(`Assertion failed: ${name} is not hidden`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `assertElementHidden failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.assertElementHidden (${name})` }
-    );
+    logger.debug(`Assert hidden → ${name}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await expect(this.getLocator(selector)).toBeHidden({ timeout: Global_Timeout.wait });
+        logger.pass(`Hidden → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`assertElementHidden failed → ${name} → ${error.message}`);
+        throw new Error(`assertElementHidden failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.assertElementHidden (${name})` });
   }
 
-  /**
-   * assertElementEnabled
-   * -------------------------------------------------------------------------
-   * Asserts that element is enabled.
-   *
-   * @param selector - Locator or string selector
-   * @returns this
-   */
   async assertElementEnabled(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    console.log(`Assert Enabled → ${name}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await expect(this.getLocator(selector)).toBeEnabled({
-            timeout: Global_Timeout.wait,
-          });
-          console.log(`Assertion passed → ${name} is enabled`);
-          return this;
-        } catch (error: any) {
-          console.error(`Assertion failed: ${name} is not enabled`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `assertElementEnabled failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.assertElementEnabled (${name})` }
-    );
+    logger.debug(`Assert enabled → ${name}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await expect(this.getLocator(selector)).toBeEnabled({ timeout: Global_Timeout.wait });
+        logger.pass(`Enabled → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`assertElementEnabled failed → ${name} → ${error.message}`);
+        throw new Error(`assertElementEnabled failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.assertElementEnabled (${name})` });
   }
 
-  /**
-   * assertElementDisabled
-   * -------------------------------------------------------------------------
-   * Asserts that element is disabled.
-   *
-   * @param selector - Locator or string selector
-   * @returns this
-   */
   async assertElementDisabled(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    console.log(`Assert Disabled → ${name}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await expect(this.getLocator(selector)).toBeDisabled({
-            timeout: Global_Timeout.wait,
-          });
-          console.log(`Assertion passed → ${name} is disabled`);
-          return this;
-        } catch (error: any) {
-          console.error(`Assertion failed: ${name} is not disabled`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `assertElementDisabled failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.assertElementDisabled (${name})` }
-    );
+    logger.debug(`Assert disabled → ${name}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await expect(this.getLocator(selector)).toBeDisabled({ timeout: Global_Timeout.wait });
+        logger.pass(`Disabled → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`assertElementDisabled failed → ${name} → ${error.message}`);
+        throw new Error(`assertElementDisabled failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.assertElementDisabled (${name})` });
   }
 
-  /**
-   * assertText
-   * -------------------------------------------------------------------------
-   * Asserts that element has given text.
-   *
-   * @param selector - Locator or string selector
-   * @param text - expected text or RegExp
-   * @returns this
-   */
-  async assertText(
-    selector: string | Locator,
-    text: string | RegExp
-  ): Promise<this> {
+  async assertText(selector: string | Locator, text: string | RegExp): Promise<this> {
     const name = this.getElementName(selector);
-    console.log(`Assert Text → ${name} == ${text}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await expect(this.getLocator(selector)).toHaveText(text, {
-            timeout: Global_Timeout.wait,
-          });
-          console.log(`Assertion passed → ${name} has correct text`);
-          return this;
-        } catch (error: any) {
-          console.error(`Assertion failed: Text mismatch for ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Expected: ${text}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `assertText failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.assertText (${name})` }
-    );
+    logger.debug(`Assert text → ${name} == "${text}"`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await expect(this.getLocator(selector)).toHaveText(text, { timeout: Global_Timeout.wait });
+        logger.pass(`Text matched → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`assertText failed → ${name} → ${error.message}`);
+        throw new Error(`assertText failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.assertText (${name})` });
   }
 
-  /**
-   * assertValue
-   * -------------------------------------------------------------------------
-   * Asserts that input has given value.
-   *
-   * @param selector - Locator or string selector
-   * @param value - expected value or RegExp
-   * @returns this
-   */
-  async assertValue(
-    selector: string | Locator,
-    value: string | RegExp
-  ): Promise<this> {
+  async assertContainsText(selector: string | Locator, text: string): Promise<this> {
     const name = this.getElementName(selector);
-    console.log(`Assert Value → ${name} == ${value}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await expect(this.getLocator(selector)).toHaveValue(value, {
-            timeout: Global_Timeout.wait,
-          });
-          console.log(`Assertion passed → ${name} has correct value`);
-          return this;
-        } catch (error: any) {
-          console.error(`Assertion failed: Value mismatch for ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Expected: ${value}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `assertValue failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.assertValue (${name})` }
-    );
+    logger.debug(`Assert contains text → ${name} contains "${text}"`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await expect(this.getLocator(selector)).toContainText(text, { timeout: Global_Timeout.wait });
+        logger.pass(`Contains text → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`assertContainsText failed → ${name} → ${error.message}`);
+        throw new Error(`assertContainsText failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.assertContainsText (${name})` });
   }
 
-  /**
-   * assertURL
-   * -------------------------------------------------------------------------
-   * Asserts that the current page URL matches expected value.
-   *
-   * @param url - expected URL or RegExp
-   * @returns this
-   */
+  async assertValue(selector: string | Locator, value: string | RegExp): Promise<this> {
+    const name = this.getElementName(selector);
+    logger.debug(`Assert value → ${name} == "${value}"`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await expect(this.getLocator(selector)).toHaveValue(value, { timeout: Global_Timeout.wait });
+        logger.pass(`Value matched → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`assertValue failed → ${name} → ${error.message}`);
+        throw new Error(`assertValue failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.assertValue (${name})` });
+  }
+
+  async assertAttributeValue(selector: string | Locator, attribute: string, value: string): Promise<this> {
+    const name = this.getElementName(selector);
+    logger.debug(`Assert attribute → ${name}[${attribute}] == "${value}"`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await expect(this.getLocator(selector)).toHaveAttribute(attribute, value, { timeout: Global_Timeout.wait });
+        logger.pass(`Attribute matched → ${name}[${attribute}]`);
+        return this;
+      } catch (error: any) {
+        logger.error(`assertAttributeValue failed → ${name}[${attribute}] → ${error.message}`);
+        throw new Error(`assertAttributeValue failed → ${name}[${attribute}] → ${error.message}`);
+      }
+    }, { context: `BasePage.assertAttributeValue (${name})` });
+  }
+
+  async assertChecked(selector: string | Locator): Promise<this> {
+    const name = this.getElementName(selector);
+    logger.debug(`Assert checked → ${name}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await expect(this.getLocator(selector)).toBeChecked({ timeout: Global_Timeout.wait });
+        logger.pass(`Checked → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`assertChecked failed → ${name} → ${error.message}`);
+        throw new Error(`assertChecked failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.assertChecked (${name})` });
+  }
+
+  async assertNotChecked(selector: string | Locator): Promise<this> {
+    const name = this.getElementName(selector);
+    logger.debug(`Assert not checked → ${name}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await expect(this.getLocator(selector)).not.toBeChecked({ timeout: Global_Timeout.wait });
+        logger.pass(`Not checked → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`assertNotChecked failed → ${name} → ${error.message}`);
+        throw new Error(`assertNotChecked failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.assertNotChecked (${name})` });
+  }
+
   async assertURL(url: string | RegExp): Promise<this> {
-    console.log(`Assert URL → ${url}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await expect(this.page).toHaveURL(url, {
-            timeout: Global_Timeout.wait,
-          });
-          console.log("Assertion passed → URL is correct");
-          return this;
-        } catch (error: any) {
-          console.error("Assertion failed: URL mismatch");
-          console.error(`Expected: ${url}`);
-          console.error(`Actual: ${this.page.url()}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `assertURL failed → expected: ${url} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.assertURL (${url})` }
-    );
+    logger.debug(`Assert URL → ${url}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await expect(this.page).toHaveURL(url, { timeout: Global_Timeout.wait });
+        logger.pass("URL matched");
+        return this;
+      } catch (error: any) {
+        logger.error(`assertURL failed → expected: ${url} | actual: ${this.page.url()}`);
+        throw new Error(`assertURL failed → expected: ${url} → ${error.message}`);
+      }
+    }, { context: `BasePage.assertURL (${url})` });
   }
 
-  /**
-   * assertTitle
-   * -------------------------------------------------------------------------
-   * Asserts that current page title matches expected value.
-   *
-   * @param title - expected title or RegExp
-   * @returns this
-   */
   async assertTitle(title: string | RegExp): Promise<this> {
-    console.log(`Assert Title → ${title}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await expect(this.page).toHaveTitle(title, {
-            timeout: Global_Timeout.wait,
-          });
-          console.log("Assertion passed → Title is correct");
-          return this;
-        } catch (error: any) {
-          const actualTitle = await this.page.title();
-          console.error("Assertion failed: Title mismatch");
-          console.error(`Expected: ${title}`);
-          console.error(`Actual: ${actualTitle}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `assertTitle failed → expected: ${title} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.assertTitle (${title})` }
-    );
+    logger.debug(`Assert title → "${title}"`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await expect(this.page).toHaveTitle(title, { timeout: Global_Timeout.wait });
+        logger.pass("Title matched");
+        return this;
+      } catch (error: any) {
+        const actual = await this.page.title();
+        logger.error(`assertTitle failed → expected: "${title}" | actual: "${actual}"`);
+        throw new Error(`assertTitle failed → expected: ${title} → ${error.message}`);
+      }
+    }, { context: `BasePage.assertTitle (${title})` });
   }
 
-  /**
-   * assertElementCount
-   * -------------------------------------------------------------------------
-   * Asserts that number of matched elements equals expected count.
-   *
-   * @param selector - Locator or string selector
-   * @param count - expected count
-   * @returns this
-   */
-  async assertElementCount(
-    selector: string | Locator,
-    count: number
-  ): Promise<this> {
+  async assertElementCount(selector: string | Locator, count: number): Promise<this> {
     const name = this.getElementName(selector);
-    console.log(`Assert Count → ${name} = ${count}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await expect(this.getLocator(selector)).toHaveCount(count, {
-            timeout: Global_Timeout.wait,
-          });
-          console.log(`Assertion passed → ${name} count is ${count}`);
-          return this;
-        } catch (error: any) {
-          const actualCount = await this.getLocator(selector).count();
-          console.error(
-            `Assertion failed: Count mismatch for ${name}`
-          );
-          console.error(`Selector: ${selector}`);
-          console.error(`Expected: ${count}`);
-          console.error(`Actual: ${actualCount}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `assertElementCount failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.assertElementCount (${name})` }
-    );
+    logger.debug(`Assert count → ${name} = ${count}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await expect(this.getLocator(selector)).toHaveCount(count, { timeout: Global_Timeout.wait });
+        logger.pass(`Count matched → ${name} = ${count}`);
+        return this;
+      } catch (error: any) {
+        const actual = await this.getLocator(selector).count();
+        logger.error(`assertElementCount failed → ${name} | expected: ${count} | actual: ${actual}`);
+        throw new Error(`assertElementCount failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.assertElementCount (${name})` });
   }
 
   // ==========================================================================
-  //  QUERY METHODS (NON-ASSERTING)
+  //  QUERY METHODS — getText and getInputValue now with auto-heal
   // ==========================================================================
 
-  /**
-   * isVisible
-   * -------------------------------------------------------------------------
-   * Immediate visibility check without waiting.
-   *
-   * @param selector - Locator or string selector
-   * @returns boolean
-   */
   async isVisible(selector: string | Locator): Promise<boolean> {
     const name = this.getElementName(selector);
-    console.log(`isVisible → ${name}`);
-
-    return ErrorHandler.handle<boolean>(
-      async () => {
-        try {
-          return await this.getLocator(selector).isVisible();
-        } catch (error: any) {
-          console.error(`isVisible failed for: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `isVisible failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.isVisible (${name})` }
-    );
+    return ErrorHandler.handle<boolean>(async () => {
+      try { return await this.getLocator(selector).isVisible(); }
+      catch (error: any) { throw new Error(`isVisible failed → ${name} → ${error.message}`); }
+    }, { context: `BasePage.isVisible (${name})` });
   }
 
-  /**
-   * isEnabled
-   * -------------------------------------------------------------------------
-   * Checks whether element is enabled.
-   *
-   * @param selector - Locator or string selector
-   * @returns boolean
-   */
   async isEnabled(selector: string | Locator): Promise<boolean> {
     const name = this.getElementName(selector);
-    console.log(`isEnabled → ${name}`);
-
-    return ErrorHandler.handle<boolean>(
-      async () => {
-        try {
-          return await this.getLocator(selector).isEnabled();
-        } catch (error: any) {
-          console.error(`isEnabled failed for: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `isEnabled failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.isEnabled (${name})` }
-    );
+    return ErrorHandler.handle<boolean>(async () => {
+      try { return await this.getLocator(selector).isEnabled(); }
+      catch (error: any) { throw new Error(`isEnabled failed → ${name} → ${error.message}`); }
+    }, { context: `BasePage.isEnabled (${name})` });
   }
 
-  /**
-   * isChecked
-   * -------------------------------------------------------------------------
-   * Checks whether a checkbox or radio is checked.
-   *
-   * @param selector - Locator or string selector
-   * @returns boolean
-   */
   async isChecked(selector: string | Locator): Promise<boolean> {
     const name = this.getElementName(selector);
-    console.log(`isChecked → ${name}`);
-
-    return ErrorHandler.handle<boolean>(
-      async () => {
-        try {
-          return await this.getLocator(selector).isChecked();
-        } catch (error: any) {
-          console.error(`isChecked failed for: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `isChecked failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.isChecked (${name})` }
-    );
+    return ErrorHandler.handle<boolean>(async () => {
+      try { return await this.getLocator(selector).isChecked(); }
+      catch (error: any) { throw new Error(`isChecked failed → ${name} → ${error.message}`); }
+    }, { context: `BasePage.isChecked (${name})` });
   }
 
   /**
-   * getText
-   * -------------------------------------------------------------------------
-   * Returns trimmed textContent of element.
-   *
-   * @param selector - Locator or string selector
-   * @returns string
+   * getText — returns trimmed textContent of element.
+   * ✔ Auto-heals if locator fails before reading.
    */
   async getText(selector: string | Locator): Promise<string> {
     const name = this.getElementName(selector);
-    console.log(`getText → ${name}`);
+    return ErrorHandler.handle<string>(async () => {
+      try {
+        // ── Auto-heal before reading text ─────────────────────────────────
+        const { locator: healed, healed: wasHealed, strategy } =
+          await autoHeal(this.getLocator(selector), 3000);
+        if (wasHealed) logger.warn(`[AutoHeal] getText healed via [${strategy}] → ${name}`);
 
-    return ErrorHandler.handle<string>(
-      async () => {
-        try {
-          return (await this.getLocator(selector).textContent())?.trim() || "";
-        } catch (error: any) {
-          console.error(`getText failed for: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `getText failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.getText (${name})` }
-    );
+        await healed.waitFor({ state: "visible", timeout: Global_Timeout.wait });
+        return (await healed.textContent())?.trim() || "";
+      } catch (error: any) {
+        throw new Error(`getText failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.getText (${name})` });
   }
 
   /**
-   * getInputValue
-   * -------------------------------------------------------------------------
-   * Returns value of input or textarea.
-   *
-   * @param selector - Locator or string selector
-   * @returns string
+   * getInputValue — returns current value of input/textarea.
+   * ✔ Auto-heals if locator fails before reading.
    */
   async getInputValue(selector: string | Locator): Promise<string> {
     const name = this.getElementName(selector);
-    console.log(`getInputValue → ${name}`);
+    return ErrorHandler.handle<string>(async () => {
+      try {
+        // ── Auto-heal before reading value ────────────────────────────────
+        const { locator: healed, healed: wasHealed, strategy } =
+          await autoHeal(this.getLocator(selector), 3000);
+        if (wasHealed) logger.warn(`[AutoHeal] getInputValue healed via [${strategy}] → ${name}`);
 
-    return ErrorHandler.handle<string>(
-      async () => {
-        try {
-          return await this.getLocator(selector).inputValue();
-        } catch (error: any) {
-          console.error(`getInputValue failed for: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `getInputValue failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.getInputValue (${name})` }
-    );
+        return await healed.inputValue();
+      } catch (error: any) {
+        throw new Error(`getInputValue failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.getInputValue (${name})` });
   }
 
-  /**
-   * getAttribute
-   * -------------------------------------------------------------------------
-   * Returns attribute value of element if present.
-   *
-   * @param selector - Locator or string selector
-   * @param attribute - attribute name
-   * @returns string | null
-   */
-  async getAttribute(
-    selector: string | Locator,
-    attribute: string
-  ): Promise<string | null> {
+  async getAttribute(selector: string | Locator, attribute: string): Promise<string | null> {
     const name = this.getElementName(selector);
-    console.log(`getAttribute → ${name}[${attribute}]`);
-
-    return ErrorHandler.handle<string | null>(
-      async () => {
-        try {
-          return await this.getLocator(selector).getAttribute(attribute);
-        } catch (error: any) {
-          console.error(`getAttribute failed for: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Attribute: ${attribute}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `getAttribute failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.getAttribute (${name})` }
-    );
+    return ErrorHandler.handle<string | null>(async () => {
+      try { return await this.getLocator(selector).getAttribute(attribute); }
+      catch (error: any) { throw new Error(`getAttribute failed → ${name}[${attribute}] → ${error.message}`); }
+    }, { context: `BasePage.getAttribute (${name})` });
   }
 
-  /**
-   * getElementCount
-   * -------------------------------------------------------------------------
-   * Returns number of elements matching the selector.
-   *
-   * @param selector - Locator or string selector
-   * @returns number
-   */
   async getElementCount(selector: string | Locator): Promise<number> {
     const name = this.getElementName(selector);
-    console.log(`getElementCount → ${name}`);
-
-    return ErrorHandler.handle<number>(
-      async () => {
-        try {
-          return await this.getLocator(selector).count();
-        } catch (error: any) {
-          console.error(`getElementCount failed for: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `getElementCount failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.getElementCount (${name})` }
-    );
+    return ErrorHandler.handle<number>(async () => {
+      try { return await this.getLocator(selector).count(); }
+      catch (error: any) { throw new Error(`getElementCount failed → ${name} → ${error.message}`); }
+    }, { context: `BasePage.getElementCount (${name})` });
   }
 
   // ==========================================================================
   //  DIALOG HANDLING
   // ==========================================================================
 
-  /**
-   * acceptDialog
-   * -------------------------------------------------------------------------
-   * Registers a one-time handler to accept the next JavaScript dialog.
-   *
-   * Example:
-   *  await this.acceptDialog();
-   *  await this.click(this.deleteButton); // when dialog appears → auto accept
-   *
-   * @param promptText - optional text to send to prompt
-   * @returns this
-   */
-  async acceptDialog(promptText?: string): Promise<this> {
-    console.log("Preparing to accept next dialog");
-
-    try {
-      this.page.once("dialog", (dialog) => {
-        console.log("Dialog appeared → Accept");
-        dialog.accept(promptText);
-      });
-      return this;
-    } catch (error: any) {
-      console.error("Failed to register acceptDialog handler");
-      console.error(`Error: ${error.message}`);
-      throw new Error(`acceptDialog failed → ${error.message}`);
-    }
+  acceptDialog(promptText?: string): this {
+    logger.debug("Dialog handler registered → Accept");
+    this.page.once("dialog", (dialog) => {
+      logger.pass(`Dialog accepted: ${dialog.message()}`);
+      dialog.accept(promptText);
+    });
+    return this;
   }
 
-  /**
-   * dismissDialog
-   * -------------------------------------------------------------------------
-   * Registers a one-time handler to dismiss the next JavaScript dialog.
-   *
-   * Example:
-   *  await this.dismissDialog();
-   *  await this.click(this.cancelButton);
-   *
-   * @returns this
-   */
-  async dismissDialog(): Promise<this> {
-    console.log("Preparing to dismiss next dialog");
-
-    try {
-      this.page.once("dialog", (dialog) => {
-        console.log("Dialog appeared → Dismiss");
-        dialog.dismiss();
-      });
-      return this;
-    } catch (error: any) {
-      console.error("Failed to register dismissDialog handler");
-      console.error(`Error: ${error.message}`);
-      throw new Error(`dismissDialog failed → ${error.message}`);
-    }
+  dismissDialog(): this {
+    logger.debug("Dialog handler registered → Dismiss");
+    this.page.once("dialog", (dialog) => {
+      logger.pass(`Dialog dismissed: ${dialog.message()}`);
+      dialog.dismiss();
+    });
+    return this;
   }
 
   // ==========================================================================
   //  IFRAME HANDLING
   // ==========================================================================
 
-  /**
-   * switchToFrame
-   * -------------------------------------------------------------------------
-   * Switches context to an iframe and returns its Page-like Frame.
-   *
-   * Example:
-   *  const frame = await this.switchToFrame(this.paymentIframe);
-   *  await frame.click("button.pay-now");
-   *
-   * @param selector - iframe locator or selector
-   * @returns Page (actually Frame typed as Page for convenience)
-   */
-  async switchToFrame(selector: string | Locator): Promise<Page> {
+  async switchToFrame(selector: string | Locator): Promise<FrameLocator> {
     const name = this.getElementName(selector);
-    console.log(`Switch To Frame → ${name}`);
+    logger.step(`Switch to frame → ${name}`);
+    return ErrorHandler.handle<FrameLocator>(async () => {
+      try {
+        const frameLocator = this.getLocator(selector).contentFrame();
+        this._currentFrame = frameLocator;
+        logger.pass(`Switched to frame → ${name}`);
+        return frameLocator;
+      } catch (error: any) {
+        logger.error(`switchToFrame failed → ${name} → ${error.message}`);
+        throw new Error(`switchToFrame failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.switchToFrame (${name})` });
+  }
 
-    return ErrorHandler.handle<Page>(
-      async () => {
-        try {
-          const frameElement = this.getLocator(selector);
-          const frame = await frameElement.contentFrame();
-          if (!frame) {
-            throw new Error(`Frame not found: ${name}`);
-          }
-          console.log(`Switched to frame → ${name}`);
-          return frame as unknown as Page;
-        } catch (error: any) {
-          console.error(`Failed to switch to frame: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `switchToFrame failed → ${name} → ${error.message}`
-          );
+  async switchToFrameByIndex(index: number): Promise<FrameLocator> {
+    logger.step(`Switch to frame by index → [${index}]`);
+    return ErrorHandler.handle<FrameLocator>(async () => {
+      try {
+        const frames = this.page.frames();
+        const actualIndex = index + 1;
+        if (actualIndex >= frames.length) {
+          throw new Error(`Frame index [${index}] out of range. Found ${frames.length - 1} iframe(s).`);
         }
-      },
-      { context: `BasePage.switchToFrame (${name})` }
-    );
+        const frameLocator = this.page.frameLocator(`iframe:nth-of-type(${actualIndex})`);
+        this._currentFrame = frameLocator;
+        logger.pass(`Switched to frame [${index}] → ${frames[actualIndex].url()}`);
+        return frameLocator;
+      } catch (error: any) {
+        logger.error(`switchToFrameByIndex failed → [${index}] → ${error.message}`);
+        throw new Error(`switchToFrameByIndex failed → [${index}] → ${error.message}`);
+      }
+    }, { context: `BasePage.switchToFrameByIndex (${index})` });
+  }
+
+  async switchToFrameByName(name: string): Promise<FrameLocator> {
+    logger.step(`Switch to frame by name → "${name}"`);
+    return ErrorHandler.handle<FrameLocator>(async () => {
+      try {
+        const frameLocator = this.page.frameLocator(`iframe[name="${name}"]`);
+        this._currentFrame = frameLocator;
+        logger.pass(`Switched to frame by name → "${name}"`);
+        return frameLocator;
+      } catch (error: any) {
+        logger.error(`switchToFrameByName failed → "${name}" → ${error.message}`);
+        throw new Error(`switchToFrameByName failed → "${name}" → ${error.message}`);
+      }
+    }, { context: `BasePage.switchToFrameByName (${name})` });
+  }
+
+  async switchToFrameById(id: string): Promise<FrameLocator> {
+    logger.step(`Switch to frame by id → "${id}"`);
+    return ErrorHandler.handle<FrameLocator>(async () => {
+      try {
+        const frameLocator = this.page.frameLocator(`iframe#${id}`);
+        this._currentFrame = frameLocator;
+        logger.pass(`Switched to frame by id → "${id}"`);
+        return frameLocator;
+      } catch (error: any) {
+        logger.error(`switchToFrameById failed → "${id}" → ${error.message}`);
+        throw new Error(`switchToFrameById failed → "${id}" → ${error.message}`);
+      }
+    }, { context: `BasePage.switchToFrameById (${id})` });
+  }
+
+  async switchToMainFrame(): Promise<this> {
+    logger.step("Switch back to main frame");
+    this._currentFrame = null;
+    logger.pass("Back to main frame");
+    return this;
+  }
+
+  getCurrentFrame(): FrameLocator | null { return this._currentFrame; }
+
+  getFrameCount(): number {
+    const count = this.page.frames().length - 1;
+    logger.debug(`Frame count → ${count}`);
+    return count;
   }
 
   // ==========================================================================
-  //  SCROLL METHODS
+  //  FILE UPLOAD
+  // ==========================================================================
+
+  async uploadFile(selector: string | Locator, filePaths: string | string[]): Promise<this> {
+    const name  = this.getElementName(selector);
+    const files = Array.isArray(filePaths) ? filePaths : [filePaths];
+    logger.debug(`Upload file → ${name} | Files: ${files.join(", ")}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await this.getLocator(selector).setInputFiles(files);
+        logger.pass(`File(s) uploaded → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`uploadFile failed → ${name} → ${error.message}`);
+        throw new Error(`uploadFile failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.uploadFile (${name})` });
+  }
+
+  async clearFileUpload(selector: string | Locator): Promise<this> {
+    const name = this.getElementName(selector);
+    logger.debug(`Clear file upload → ${name}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await this.getLocator(selector).setInputFiles([]);
+        logger.pass(`File upload cleared → ${name}`);
+        return this;
+      } catch (error: any) {
+        logger.error(`clearFileUpload failed → ${name} → ${error.message}`);
+        throw new Error(`clearFileUpload failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.clearFileUpload (${name})` });
+  }
+
+  // ==========================================================================
+  //  COOKIES & LOCAL STORAGE
+  // ==========================================================================
+
+  async getCookie(name: string): Promise<string | undefined> {
+    logger.debug(`Get cookie → "${name}"`);
+    const cookies = await this.page.context().cookies();
+    const cookie  = cookies.find(c => c.name === name);
+    logger.pass(`Cookie "${name}" → ${cookie?.value ?? "not found"}`);
+    return cookie?.value;
+  }
+
+  async clearCookies(): Promise<this> {
+    logger.debug("Clear all cookies");
+    await this.page.context().clearCookies();
+    logger.pass("Cookies cleared");
+    return this;
+  }
+
+  async getLocalStorageItem(key: string): Promise<string | null> {
+    logger.debug(`Get localStorage → "${key}"`);
+    const value = await this.page.evaluate((k) => window.localStorage.getItem(k), key);
+    logger.pass(`localStorage "${key}" → ${value ?? "null"}`);
+    return value;
+  }
+
+  async setLocalStorageItem(key: string, value: string): Promise<this> {
+    logger.debug(`Set localStorage → "${key}" = "${value}"`);
+    await this.page.evaluate(({ k, v }) => window.localStorage.setItem(k, v), { k: key, v: value });
+    logger.pass(`localStorage set → "${key}"`);
+    return this;
+  }
+
+  async clearLocalStorage(): Promise<this> {
+    logger.debug("Clear localStorage");
+    await this.page.evaluate(() => window.localStorage.clear());
+    logger.pass("localStorage cleared");
+    return this;
+  }
+
+  // ==========================================================================
+  //  NETWORK INTERCEPTION
+  // ==========================================================================
+
+  async mockAPIResponse(urlPattern: string, responseBody: object, status: number = 200): Promise<this> {
+    logger.debug(`Mock API → ${urlPattern} | status: ${status}`);
+    await this.page.route(urlPattern, async (route) => {
+      await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(responseBody) });
+    });
+    logger.pass(`API mocked → ${urlPattern}`);
+    return this;
+  }
+
+  async blockRequest(urlPattern: string): Promise<this> {
+    logger.debug(`Block request → ${urlPattern}`);
+    await this.page.route(urlPattern, (route) => route.abort());
+    logger.pass(`Request blocked → ${urlPattern}`);
+    return this;
+  }
+
+  // ==========================================================================
+  //  JAVASCRIPT EXECUTION
+  // ==========================================================================
+
+  async executeScript<T = void>(script: string): Promise<T> {
+    logger.debug(`Execute script → ${script.substring(0, 60)}...`);
+    return ErrorHandler.handle<T>(async () => {
+      try {
+        const result = await this.page.evaluate(script);
+        logger.pass("Script executed");
+        return result as T;
+      } catch (error: any) {
+        logger.error(`executeScript failed → ${error.message}`);
+        throw new Error(`executeScript failed → ${error.message}`);
+      }
+    }, { context: "BasePage.executeScript" });
+  }
+
+  // ==========================================================================
+  //  CLIPBOARD
+  // ==========================================================================
+
+  async getClipboardText(): Promise<string> {
+    logger.debug("Get clipboard text");
+    return ErrorHandler.handle<string>(async () => {
+      try {
+        const text = await this.page.evaluate(() => navigator.clipboard.readText());
+        logger.pass(`Clipboard text → "${text}"`);
+        return text;
+      } catch (error: any) {
+        logger.error(`getClipboardText failed → ${error.message}`);
+        throw new Error(`getClipboardText failed → ${error.message}`);
+      }
+    }, { context: "BasePage.getClipboardText" });
+  }
+
+  // ==========================================================================
+  //  SCROLL METHODS — scrollToElement now with auto-heal
   // ==========================================================================
 
   /**
-   * scrollToElement
-   * -------------------------------------------------------------------------
-   * Scrolls the element into view using scrollIntoViewIfNeeded.
-   *
-   * @param selector - Locator or string selector
-   * @returns this
+   * scrollToElement — scrolls element into viewport.
+   * ✔ Auto-heals if locator fails before scrolling.
    */
   async scrollToElement(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    console.log(`Scroll To Element → ${name}`);
+    logger.debug(`Scroll to element → ${name}`);
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        // ── Auto-heal before scrolling ────────────────────────────────────
+        const { locator: healed, healed: wasHealed, strategy } =
+          await autoHeal(this.getLocator(selector), 3000);
+        if (wasHealed) logger.warn(`[AutoHeal] scrollToElement healed via [${strategy}] → ${name}`);
 
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.getLocator(selector).scrollIntoViewIfNeeded({
-            timeout: 5000,
-          });
-          console.log(`Scrolled to element → ${name}`);
-          return this;
-        } catch (error: any) {
-          console.error(`Failed to scroll to element: ${name}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `scrollToElement failed → ${name} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.scrollToElement (${name})` }
-    );
+        await healed.scrollIntoViewIfNeeded({ timeout: 5000 });
+        logger.pass(`Scrolled to → ${name}`);
+        return this;
+      } catch (error: any) {
+        throw new Error(`scrollToElement failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.scrollToElement (${name})` });
   }
 
-  /**
-   * scrollToTop
-   * -------------------------------------------------------------------------
-   * Scrolls to the top of the page.
-   *
-   * @returns this
-   */
   async scrollToTop(): Promise<this> {
-    console.log("Scroll To Top");
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.page.evaluate(() => {
-            window.scrollTo(0, 0);
-          });
-          console.log("Scrolled to page top");
-          return this;
-        } catch (error: any) {
-          console.error("Failed to scroll to top");
-          console.error(`Error: ${error.message}`);
-          throw new Error(`scrollToTop failed → ${error.message}`);
-        }
-      },
-      { context: "BasePage.scrollToTop" }
-    );
+    logger.debug("Scroll to top");
+    return ErrorHandler.handle<this>(async () => {
+      await this.page.evaluate(() => window.scrollTo(0, 0));
+      logger.pass("Scrolled to top");
+      return this;
+    }, { context: "BasePage.scrollToTop" });
   }
 
-  /**
-   * scrollToBottom
-   * -------------------------------------------------------------------------
-   * Scrolls to the bottom of the page.
-   *
-   * @returns this
-   */
   async scrollToBottom(): Promise<this> {
-    console.log("Scroll To Bottom");
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.page.evaluate(() => {
-            window.scrollTo(0, document.body.scrollHeight);
-          });
-          console.log("Scrolled to page bottom");
-          return this;
-        } catch (error: any) {
-          console.error("Failed to scroll to bottom");
-          console.error(`Error: ${error.message}`);
-          throw new Error(`scrollToBottom failed → ${error.message}`);
-        }
-      },
-      { context: "BasePage.scrollToBottom" }
-    );
+    logger.debug("Scroll to bottom");
+    return ErrorHandler.handle<this>(async () => {
+      await this.page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      logger.pass("Scrolled to bottom");
+      return this;
+    }, { context: "BasePage.scrollToBottom" });
   }
 
-  /**
-   * scrollBy
-   * -------------------------------------------------------------------------
-   * Scrolls the page by given x and y offsets.
-   *
-   * @param x - horizontal offset
-   * @param y - vertical offset
-   * @returns this
-   */
   async scrollBy(x: number, y: number): Promise<this> {
-    console.log(`Scroll By → x=${x}, y=${y}`);
-
-    return ErrorHandler.handle<this>(
-      async () => {
-        try {
-          await this.page.evaluate(
-            ({ scrollX, scrollY }) => {
-              window.scrollBy(scrollX, scrollY);
-            },
-            { scrollX: x, scrollY: y }
-          );
-          console.log(`Scrolled by x=${x}, y=${y}`);
-          return this;
-        } catch (error: any) {
-          console.error("Failed to scrollBy");
-          console.error(`Error: ${error.message}`);
-          throw new Error(`scrollBy failed → ${error.message}`);
-        }
-      },
-      { context: "BasePage.scrollBy" }
-    );
+    logger.debug(`Scroll by x=${x}, y=${y}`);
+    return ErrorHandler.handle<this>(async () => {
+      await this.page.evaluate(
+        ({ scrollX, scrollY }) => window.scrollBy(scrollX, scrollY),
+        { scrollX: x, scrollY: y }
+      );
+      logger.pass(`Scrolled by x=${x}, y=${y}`);
+      return this;
+    }, { context: "BasePage.scrollBy" });
   }
 
   // ==========================================================================
   //  SCREENSHOT METHODS
   // ==========================================================================
 
-  /**
-   * takeScreenshot
-   * -------------------------------------------------------------------------
-   * Takes a full page screenshot and stores under test-results/screenshots.
-   *
-   * @param name - base name for screenshot file
-   */
   async takeScreenshot(name = "screenshot"): Promise<void> {
     const fileName = `${name}_${Date.now()}.png`;
-    console.log(`Full Screenshot → ${fileName}`);
-
-    return ErrorHandler.handle<void>(
-      async () => {
-        try {
-          await this.page.screenshot({
-            path: `test-results/screenshots/${fileName}`,
-            fullPage: true,
-          });
-        } catch (error: any) {
-          console.error(
-            `Failed to capture full screenshot: ${fileName}`
-          );
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `takeScreenshot failed → ${fileName} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.takeScreenshot (${fileName})` }
-    );
+    logger.debug(`Screenshot → ${fileName}`);
+    return ErrorHandler.handle<void>(async () => {
+      try {
+        await this.page.screenshot({ path: `test-results/screenshots/${fileName}`, fullPage: true });
+        logger.pass(`Screenshot saved → ${fileName}`);
+      } catch (error: any) {
+        throw new Error(`takeScreenshot failed → ${fileName} → ${error.message}`);
+      }
+    }, { context: `BasePage.takeScreenshot (${fileName})` });
   }
 
-  /**
-   * takeElementScreenshot
-   * -------------------------------------------------------------------------
-   * Takes screenshot of a specific element.
-   *
-   * @param selector - element selector
-   * @param name - base file name
-   */
-  async takeElementScreenshot(
-    selector: string | Locator,
-    name = "element"
-  ): Promise<void> {
+  async takeElementScreenshot(selector: string | Locator, name = "element"): Promise<void> {
     const elemName = this.getElementName(selector);
     const fileName = `${name}_${Date.now()}.png`;
-    console.log(
-      `Element Screenshot → ${elemName} → ${fileName}`
-    );
-
-    return ErrorHandler.handle<void>(
-      async () => {
-        try {
-          await this.getLocator(selector).screenshot({
-            path: `test-results/screenshots/${fileName}`,
-          });
-        } catch (error: any) {
-          console.error(
-            `Failed to capture element screenshot: ${elemName}`
-          );
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `takeElementScreenshot failed → ${elemName} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.takeElementScreenshot (${elemName})` }
-    );
+    logger.debug(`Element screenshot → ${elemName} → ${fileName}`);
+    return ErrorHandler.handle<void>(async () => {
+      try {
+        await this.getLocator(selector).screenshot({ path: `test-results/screenshots/${fileName}` });
+        logger.pass(`Element screenshot saved → ${fileName}`);
+      } catch (error: any) {
+        throw new Error(`takeElementScreenshot failed → ${elemName} → ${error.message}`);
+      }
+    }, { context: `BasePage.takeElementScreenshot (${elemName})` });
   }
 
   // ==========================================================================
   //  MISC UTILITIES
   // ==========================================================================
 
-  /**
-   * getCurrentURL
-   * -------------------------------------------------------------------------
-   * Returns current page URL.
-   *
-   * @returns string
-   */
   getCurrentURL(): string {
-    try {
-      const url = this.page.url();
-      console.log(`getCurrentURL → ${url}`);
-      return url;
-    } catch (error: any) {
-      console.error("getCurrentURL failed");
-      console.error(`Error: ${error.message}`);
-      throw new Error(`getCurrentURL failed → ${error.message}`);
-    }
+    const url = this.page.url();
+    logger.debug(`getCurrentURL → ${url}`);
+    return url;
   }
 
-  /**
-   * getTitle
-   * -------------------------------------------------------------------------
-   * Returns current page title.
-   *
-   * @returns string
-   */
   async getTitle(): Promise<string> {
-    try {
-      const title = await this.page.title();
-      console.log(`getTitle → ${title}`);
-      return title;
-    } catch (error: any) {
-      console.error("getTitle failed");
-      console.error(`Error: ${error.message}`);
-      throw new Error(`getTitle failed → ${error.message}`);
-    }
+    const title = await this.page.title();
+    logger.debug(`getTitle → ${title}`);
+    return title;
   }
 
-  /**
-   * getPage
-   * -------------------------------------------------------------------------
-   * Returns underlying Playwright Page instance.
-   *
-   * @returns Page
-   */
-  getPage(): Page {
-    console.log("getPage → Playwright.Page returned");
-    return this.page;
-  }
+  getPage(): Page { return this.page; }
 
-  /**
-   * pause
-   * -------------------------------------------------------------------------
-   * Hard wait using page.waitForTimeout. Use mainly for debugging.
-   *
-   * @param milliseconds - time to wait, default 1000
-   * @returns this
-   */
-  async pause(milliseconds?: number): Promise<this> {
-    const ms = milliseconds || 1000;
-    console.log(`pause → ${ms}ms`);
-
-    try {
-      await this.page.waitForTimeout(ms);
-      return this;
-    } catch (error: any) {
-      console.error("pause failed");
-      console.error(`Error: ${error.message}`);
-      throw new Error(`pause failed → ${error.message}`);
-    }
+  async pause(milliseconds = 1000): Promise<this> {
+    logger.warn(`pause → ${milliseconds}ms (avoid in production tests)`);
+    await this.page.waitForTimeout(milliseconds);
+    return this;
   }
 
   // ==========================================================================
-  //  RUNTIME STORE HELPERS (Testsigma-style)
+  //  RUNTIME STORE HELPERS
   // ==========================================================================
 
-  /**
-   * storeTextContent
-   * -------------------------------------------------------------------------
-   * Reads textContent from an element and stores it into Runtime under a key.
-   *
-   * Flow:
-   *  1. Convert selector to Locator
-   *  2. Wait until visible
-   *  3. Read textContent, trim it
-   *  4. Runtime.set(key, value)
-   *
-   * Example:
-   *  await this.storeTextContent(this.hotelName, "HOTEL_NAME");
-   *  // Later:
-   *  console.log(Runtime.get("HOTEL_NAME"));
-   *
-   * @param selector - Locator or string
-   * @param key - runtime store key
-   */
-  async storeTextContent(
-    selector: Locator | string,
-    key: string
-  ): Promise<void> {
-    return ErrorHandler.handle<void>(
-      async () => {
-        try {
-          const loc = this.getLocator(selector);
-
-          await loc.waitFor({
-            state: "visible",
-            timeout: Global_Timeout.wait,
-          });
-
-          const rawText = await loc.textContent();
-          const value = rawText?.trim() || "";
-
-          Runtime.set(key, value);
-          console.log(`Text stored → ${key}: "${value}"`);
-        } catch (error: any) {
-          console.error(`Failed to store text for key: ${key}`);
-          console.error(`Selector: ${selector}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `storeTextContent failed → ${key} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.storeTextContent (${key})` }
-    );
+  async storeTextContent(selector: Locator | string, key: string): Promise<void> {
+    return ErrorHandler.handle<void>(async () => {
+      try {
+        const loc = this.getLocator(selector);
+        await loc.waitFor({ state: "visible", timeout: Global_Timeout.wait });
+        const value = (await loc.textContent())?.trim() || "";
+        Runtime.set(key, value);
+        logger.pass(`Stored text → ${key}: "${value}"`);
+      } catch (error: any) {
+        logger.error(`storeTextContent failed → ${key} → ${error.message}`);
+        throw new Error(`storeTextContent failed → ${key} → ${error.message}`);
+      }
+    }, { context: `BasePage.storeTextContent (${key})` });
   }
 
-  /**
-   * storeInputValue
-   * -------------------------------------------------------------------------
-   * Reads inputValue from a field and stores it into Runtime.
-   *
-   * If inputValue fails (non-input element), it stores empty string.
-   *
-   * Example:
-   *  await this.storeInputValue(this.cityInput, "CITY");
-   *  console.log(Runtime.get("CITY"));
-   *
-   * @param selector - input/textarea selector or Locator
-   * @param key - runtime key
-   */
-  async storeInputValue(
-    selector: Locator | string,
-    key: string
-  ): Promise<void> {
-    return ErrorHandler.handle<void>(
-      async () => {
-        let value = "";
-        try {
-          const loc = this.getLocator(selector);
-          value = (await loc.inputValue())?.trim();
-        } catch {
-          value = "";
-        }
-
-        try {
-          Runtime.set(key, value);
-          console.log(`Input value stored → ${key}: "${value}"`);
-        } catch (error: any) {
-          console.error(`Failed to store input value for key: ${key}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `storeInputValue failed → ${key} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.storeInputValue (${key})` }
-    );
+  async storeInputValue(selector: Locator | string, key: string): Promise<void> {
+    return ErrorHandler.handle<void>(async () => {
+      let value = "";
+      try { value = (await this.getLocator(selector).inputValue())?.trim() || ""; }
+      catch { value = ""; }
+      try {
+        Runtime.set(key, value);
+        logger.pass(`Stored input → ${key}: "${value}"`);
+      } catch (error: any) {
+        throw new Error(`storeInputValue failed → ${key} → ${error.message}`);
+      }
+    }, { context: `BasePage.storeInputValue (${key})` });
   }
 
-  /**
-   * storeAttributeValue
-   * -------------------------------------------------------------------------
-   * Reads a given attribute from element and stores it into Runtime.
-   *
-   * Example:
-   *  await this.storeAttributeValue(this.hotelCard, "data-id", "HOTEL_ID");
-   *  console.log(Runtime.get("HOTEL_ID"));
-   *
-   * @param selector - element selector
-   * @param attribute - attribute name
-   * @param key - runtime key
-   */
-  async storeAttributeValue(
-    selector: Locator | string,
-    attribute: string,
-    key: string
-  ): Promise<void> {
-    return ErrorHandler.handle<void>(
-      async () => {
-        try {
-          const loc = this.getLocator(selector);
-          const value = (await loc.getAttribute(attribute))?.trim() || "";
-          Runtime.set(key, value);
-          console.log(
-            `Attribute stored → ${key} [${attribute}]: "${value}"`
-          );
-        } catch (error: any) {
-          console.error(
-            `Failed to store attribute for key: ${key}`
-          );
-          console.error(`Selector: ${selector}`);
-          console.error(`Attribute: ${attribute}`);
-          console.error(`Error: ${error.message}`);
-          throw new Error(
-            `storeAttributeValue failed → ${key} → ${error.message}`
-          );
-        }
-      },
-      { context: `BasePage.storeAttributeValue (${key})` }
-    );
+  async storeAttributeValue(selector: Locator | string, attribute: string, key: string): Promise<void> {
+    return ErrorHandler.handle<void>(async () => {
+      try {
+        const value = (await this.getLocator(selector).getAttribute(attribute))?.trim() || "";
+        Runtime.set(key, value);
+        logger.pass(`Stored attribute → ${key} [${attribute}]: "${value}"`);
+      } catch (error: any) {
+        logger.error(`storeAttributeValue failed → ${key} → ${error.message}`);
+        throw new Error(`storeAttributeValue failed → ${key} → ${error.message}`);
+      }
+    }, { context: `BasePage.storeAttributeValue (${key})` });
   }
 }

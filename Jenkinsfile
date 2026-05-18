@@ -325,7 +325,7 @@ pipeline {
   body { font-family: Arial, sans-serif; font-size: 14px; }
   h2 { color: #d58f00; }
   table {
-    border-collapse: collapse;
+    border-collapse: collapse;   
     width: 100%;
     margin-top: 10px;
   }

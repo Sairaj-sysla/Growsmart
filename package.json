@@ -5,20 +5,26 @@
   "main": "index.js",
   "scripts": {
     "test": "npx playwright test",
-    "test:dev": "cross-env ENVIRONMENT=dev npx playwright test --headed",
     "test:qa": "cross-env ENVIRONMENT=qa npx playwright test",
-    "test:api": "npx playwright test src/tests/api/",
-    "test:ui": "npx playwright test src/tests/ui/",
-    "test:mmt": "npx playwright test src/tests/ui/mmt/",
-    "test:headed": "npx playwright test --headed",
-    "test:debug": "npx playwright test --debug",
+    "test:dev": "cross-env ENVIRONMENT=dev npx playwright test",
+    "test:qa:headed": "cross-env ENVIRONMENT=qa npx playwright test --headed",
+    "test:dev:headed": "cross-env ENVIRONMENT=dev npx playwright test --headed",
+    "test:qa:ui": "cross-env ENVIRONMENT=qa npx playwright test --ui",
+    "test:dev:ui": "cross-env ENVIRONMENT=dev npx playwright test --ui",
+    "test:qa:debug": "cross-env ENVIRONMENT=qa npx playwright test --debug",
+    "test:dev:debug": "cross-env ENVIRONMENT=dev npx playwright test --debug",
+    "test:ci": "cross-env ENVIRONMENT=qa CI=true npx playwright test",
+    "test:api": "cross-env ENVIRONMENT=qa npx playwright test src/tests/api/",
+    "test:ui-tests": "cross-env ENVIRONMENT=qa npx playwright test src/tests/ui/",
+    "test:mmt": "cross-env ENVIRONMENT=qa npx playwright test src/tests/ui/mmt/",
     "test:chrome": "npx playwright test --project=chromium",
     "test:firefox": "npx playwright test --project=firefox",
     "test:webkit": "npx playwright test --project=webkit",
     "test:parallel": "npx playwright test --workers=4",
-    "test:report": "npx playwright show-report",
-    "test:ui-mode": "npx playwright test --ui",
-    "codegen": "npx playwright codegen"
+    "report:show": "npx playwright show-report playwright-report",
+    "report:allure": "allure serve allure-results",
+    "codegen": "npx playwright codegen",
+    "pw:install": "npx playwright install --with-deps"
   },
   "keywords": [
     "playwright",
@@ -32,9 +38,7 @@
   "author": "K. Sai Raj",
   "license": "MIT",
   "dependencies": {
-    "cross-env": "^7.0.3",
     "csv-parse": "^6.1.0",
-    "dotenv": "^16.6.1",
     "exceljs": "^4.4.0",
     "fs-extra": "^11.3.2",
     "zod": "^4.1.12"
@@ -42,9 +46,9 @@
   "devDependencies": {
     "@playwright/test": "^1.56.1",
     "@types/fs-extra": "^11.0.4",
-    "@types/jquery": "^3.5.33",
-    "@types/node": "^20.12.12",
+    "@types/node": "^20.19.41",
     "allure-playwright": "^3.4.2",
+    "cross-env": "^7.0.3",
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.4.5"
   },
