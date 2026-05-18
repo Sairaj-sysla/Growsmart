@@ -49,7 +49,7 @@ export class EasyMyTripPage extends BasePage {
     super(page);
     this.hotelBooking = this.getLocator('(//span[text()="HOTELS"] | //span[text()="Hotels"])[1]');
     this.enterCityName = this.getLocator("//div[contains(@class,'selectHtlCity')]");
-    this.enteringCityName = this.getLocator("//input[@id='']");
+    this.enteringCityName = this.getLocator("//input[@id='txtCityhddghdg']");
     this.check_In = this.getLocator("//span[@id='txtcid']");
     this.check_out = this.getLocator("//span[@id='txtcod']");
     this.room_guests = this.getLocator("//span[text()=' Room ']");
