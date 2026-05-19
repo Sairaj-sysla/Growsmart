@@ -7,6 +7,8 @@
     "test": "npx playwright test",
     "test:qa": "cross-env ENVIRONMENT=qa npx playwright test",
     "test:dev": "cross-env ENVIRONMENT=dev npx playwright test",
+    "test:qa:headless": "cross-env ENVIRONMENT=qa HEADLESS=true npx playwright test",
+    "test:dev:headless": "cross-env ENVIRONMENT=dev HEADLESS=true npx playwright test",
     "test:qa:headed": "cross-env ENVIRONMENT=qa npx playwright test --headed",
     "test:dev:headed": "cross-env ENVIRONMENT=dev npx playwright test --headed",
     "test:qa:ui": "cross-env ENVIRONMENT=qa npx playwright test --ui",

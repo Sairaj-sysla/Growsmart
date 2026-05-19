@@ -44,6 +44,7 @@ export class EasyMyTripPage extends BasePage {
     check_out_date: Locator;
     //cleanCheckIn: string = "";
    // cleanCheckOut: string = "";
+   CityName: Locator;
 
   constructor(page: Page) {
     super(page);
@@ -71,13 +72,14 @@ export class EasyMyTripPage extends BasePage {
     this.AfterenteredRoomsGuests = this.getLocator('//span[contains(@class,"guests_selected guests-selected")]');
     this.Popularity= this.getLocator('//*[text()="Popularity"]');
     this.Price= this.getLocator('//*[text()="High to Low"]/../..//input[@type="radio"]');
-     this.Hotels =this.getLocator('//div[contains(@class,"d-flex gap-10 aradjstfull")]/../..//div[contains(@class,"htl-nm handyufyufc")]');
+     this.Hotels =this.getLocator('//div[contains(@class,"d-flex gap-10 aradjstfull")]/../..//div[contains(@class,"htl-nm hand")]');
      this.review= this.getLocator('//div[contains(@class,"htl-rating d-flex align-items-center ng-star")]');
      this.price= this.getLocator('//div[@class="prcntx ng-star-inserted"]/..//div[contains(@class,"htlprc")]');
      this.Check_in = this.getLocator('(//p[contains(@class,"fnt")])[1]');
      this.check_in_date=this.getLocator('//div[text()="Check-In"]/../..//input[@type="text"]');
      this.check_Out=this.getLocator('(//p[contains(@class,"fnt")])[2]');
-     this.check_out_date=this.getLocator('//div[text()="Check-Out"]/../..//input[@type="text"]');   
+     this.check_out_date=this.getLocator('//div[text()="Check-Out"]/../..//input[@type="text"]'); 
+     this.CityName = this.getLocator('(//div[contains(text(),"Kolar")])[2]');
   }
 
   async navigateToEasyMyTrip() {
@@ -92,12 +94,13 @@ export class EasyMyTripPage extends BasePage {
     await this.waitForElementIsVisible(this.enterCityName);
     await this.click(this.enterCityName);
     await this.type(this.enteringCityName, "Kolar");
-    await this.page.locator('(//div[contains(text(),"Kolar")])[2]').click();
-    
+    //await this.page.locator('(//div[contains(text(),"Kolar")])[2]').click();
+    await this.waitForElementIsVisible(this.CityName);
+    await this.click(this.CityName);
    
     this.enteredCityName = await this.page.locator('//span[@class="hp_city"]').textContent() || "";
-     await this.storeInputValue(this.enteredCityName,"cityname")
-    console.log("Entered City Name: ", this.enteredCityName);
+     //await this.storeInputValue(this.enteredCityName,"cityname")
+    //console.log("Entered City Name: ", this.enteredCityName);
   }
 
   async selectCheckInCheckOutDate() {

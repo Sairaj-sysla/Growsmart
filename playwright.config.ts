@@ -10,11 +10,19 @@ const baseURL       = configManager.getBaseURL();
 const browserConf   = configManager.getBrowserConfig();
 const env           = configManager.getEnvironment();
 const isCI          = !!process.env.CI;
+const headlessEnv   = process.env.HEADLESS?.trim().toLowerCase();
+const headless      = isCI
+  ? true
+  : headlessEnv === "true"
+    ? true
+    : headlessEnv === "false"
+      ? false
+      : browserConf.headless;
 const actionTimeout = configManager.getTimeout("action");
 const navTimeout    = configManager.getTimeout("navigation");
 const slowMo        = isCI ? 0 : (browserConf.slowMo ?? 0);
 
-console.log(`\n▶ Running on ENV: ${env.toUpperCase()} | CI: ${isCI} | BASE URL: ${baseURL}\n`);
+console.log(`\n▶ Running on ENV: ${env.toUpperCase()} | CI: ${isCI} | HEADLESS: ${headless} | BASE URL: ${baseURL}\n`);
 
 // ============================================================================
 // Playwright Config
@@ -37,7 +45,7 @@ export default defineConfig({
   use: {
     baseURL,
 
-    headless: isCI ? true : browserConf.headless,
+    headless,
 
     // viewport: null = full browser window size
     // Cannot be combined with devices[] spread

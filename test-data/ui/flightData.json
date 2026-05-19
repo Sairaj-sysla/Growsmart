@@ -1,0 +1,29 @@
+{
+  "profile": "Flight Booking Profile",
+  "sets": [
+    {
+      "setName": "Set 1",
+      "description": "Chennai to Bangalore Business",
+      "from": "chennai",
+      "to": "bangalore",
+      "tripType": "roundTrip",
+      "departDays": 0,
+      "returnDays": 5,
+      "adults": 2,
+      "children": 1,
+      "travelClass": "Business"
+    },
+    {
+      "setName": "Set 2",
+      "description": "Mumbai to Delhi Economy",
+      "from": "mumbai",
+      "to": "delhi",
+      "tripType": "roundTrip",
+      "departDays": 1,
+      "returnDays": 7,
+      "adults": 1,
+      "children": 0,
+      "travelClass": "Economy"
+    }
+  ]
+}
