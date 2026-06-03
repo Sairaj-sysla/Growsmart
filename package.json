@@ -26,7 +26,35 @@
     "report:show": "npx playwright show-report playwright-report",
     "report:allure": "allure serve allure-results",
     "codegen": "npx playwright codegen",
-    "pw:install": "npx playwright install --with-deps"
+    "pw:install": "npx playwright install --with-deps",
+    "smoke": "cross-env ENVIRONMENT=qa npx playwright test --grep \"@smoke\"",
+    "smoke:headed": "cross-env ENVIRONMENT=qa npx playwright test --grep \"@smoke\" --headed",
+    "smoke:dev": "cross-env ENVIRONMENT=dev npx playwright test --grep \"@smoke\"",
+    "smoke:ci": "cross-env ENVIRONMENT=qa CI=true npx playwright test --grep \"@smoke\"",
+    "regression": "cross-env ENVIRONMENT=qa npx playwright test --grep \"@regression\"",
+    "regression:headed": "cross-env ENVIRONMENT=qa npx playwright test --grep \"@regression\" --headed",
+    "regression:dev": "cross-env ENVIRONMENT=dev npx playwright test --grep \"@regression\"",
+    "regression:ci": "cross-env ENVIRONMENT=qa CI=true npx playwright test --grep \"@regression\"",
+    "sanity": "cross-env ENVIRONMENT=qa npx playwright test --grep \"@sanity\"",
+    "sanity:headed": "cross-env ENVIRONMENT=qa npx playwright test --grep \"@sanity\" --headed",
+    "sanity:dev": "cross-env ENVIRONMENT=dev npx playwright test --grep \"@sanity\"",
+    "p1": "cross-env ENVIRONMENT=qa npx playwright test --grep \"@p1\"",
+    "p2": "cross-env ENVIRONMENT=qa npx playwright test --grep \"@p2\"",
+    "smoke:regression": "cross-env ENVIRONMENT=qa npx playwright test --grep \"@smoke|@regression\"",
+    "exclude:slow": "cross-env ENVIRONMENT=qa npx playwright test --grep-invert \"@slow\"",
+    "exclude:wip": "cross-env ENVIRONMENT=qa npx playwright test --grep-invert \"@wip\"",
+    "exclude:flaky": "cross-env ENVIRONMENT=qa npx playwright test --grep-invert \"@flaky\"",
+    "typecheck": "tsc --noEmit",
+    "typecheck:watch": "tsc --noEmit --watch",
+    "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix",
+    "check": "npm run typecheck && npm run lint",
+    "check:fix": "npm run typecheck && npm run lint:fix",
+    "pretest": "npm run typecheck",
+    "heal:report": "ts-node src/autoheal/heal-apply.ts --report",
+    "heal:apply": "ts-node src/autoheal/heal-apply.ts",
+    "heal:apply:all": "ts-node src/autoheal/heal-apply.ts --all",
+    "heal:clear": "ts-node src/autoheal/heal-apply.ts --clear"
   },
   "keywords": [
     "playwright",
@@ -43,16 +71,24 @@
     "csv-parse": "^6.1.0",
     "exceljs": "^4.4.0",
     "fs-extra": "^11.3.2",
+    "pdf-parse": "^1.1.1",
     "zod": "^4.1.12"
   },
   "devDependencies": {
+    "@faker-js/faker": "^8.4.1",
     "@playwright/test": "^1.56.1",
     "@types/fs-extra": "^11.0.4",
     "@types/node": "^20.19.41",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
     "allure-playwright": "^3.4.2",
     "cross-env": "^7.0.3",
+    "eslint": "^8.57.0",
     "tsconfig-paths": "^4.2.0",
-    "typescript": "^5.4.5"
+    "typescript": "^6.0.3"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   },
   "type": "commonjs"
 }

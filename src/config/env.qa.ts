@@ -6,8 +6,8 @@ export const qaConfig: AppConfig = {
   easyURL : "https://www.easemytrip.com/",
 
   credentials: {
-    username: "auto-testadmin@bluecopa.com",
-    password: "Admin@copa123",
+    username: "dummy_user",
+    password: "dummy_password",
   },
 
   timeouts: {

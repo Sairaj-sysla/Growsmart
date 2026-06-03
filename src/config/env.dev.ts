@@ -2,12 +2,12 @@ import type { AppConfig } from "./types";
 
 export const devConfig: AppConfig = {
   env: "dev",
-  baseURL: "https://showcase.bluecopa.com/welcome",
+  baseURL: "https://www.easemytrip.com/",
   easyURL: "https://www.easemytrip.com/",
 
   credentials: {
-    username: "auto-testadmin@bluecopa.com",
-    password: "Admin@copa123",
+    username: "testuser",
+    password: "password123",
   },
 
   timeouts: {

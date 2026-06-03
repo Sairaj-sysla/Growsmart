@@ -28,18 +28,26 @@ console.log(`\n▶ Running on ENV: ${env.toUpperCase()} | CI: ${isCI} | HEADLESS
 // Playwright Config
 // ============================================================================
 export default defineConfig({
+
+  // ── Point to your tests folder ───────────────────────────────────────────
   testDir: "./src/tests",
 
+  // ── Tell VS Code extension which files are test files ────────────────────
+  // This is what shows the ▶ run button in VS Code
+  testMatch: "**/*.spec.ts",
 
- timeout: 900_000,
+  // ── Global setup — runs once before entire suite ──────────────────────────
+  globalSetup: "./src/fixtures/globalSetup.ts",
+
+  timeout: 900_000,
 
   expect: {
     timeout: 25_000,
   },
 
-  forbidOnly: isCI,
-  retries:    isCI ? 1 : 0,
-  workers:    isCI ? 2 : 4,
+  forbidOnly:  isCI,
+  retries:     isCI ? 1 : 0,
+  workers:     isCI ? 2 : 4,
   maxFailures: isCI ? 20 : undefined,
 
   use: {
@@ -48,7 +56,6 @@ export default defineConfig({
     headless,
 
     // viewport: null = full browser window size
-    // Cannot be combined with devices[] spread
     viewport: null,
 
     launchOptions: isCI

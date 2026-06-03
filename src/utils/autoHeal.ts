@@ -1,20 +1,15 @@
 // ============================================================================
-//  AUTO-HEAL ENGINE - Runtime DOM Recovery + Playwright Smart Healing
+//  AUTO-HEAL ENGINE v3 — Runtime DOM Recovery + Playwright Smart Healing
 // ----------------------------------------------------------------------------
 //  FLOW:
-//  Original Locator
-//    -> getByRole()
-//    -> getByLabel()
-//    -> getByPlaceholder()
-//    -> getByText()
-//    -> CSS Recovery
-//    -> XPath Recovery (exact + contains)
-//    -> DOM Similarity Recovery
-//    -> Fail Clearly
+//    Primary → getByRole → getByLabel → getByPlaceholder → getByText
+//    → CSS → XPath → DOM Similarity → Relative XPath → Position → Fail
+//
+//  RULE: if multiple elements match the same strategy → take .first()
 // ============================================================================
 
 import { Locator, Page } from "@playwright/test";
-import { logger } from "./logger";
+import { logger }        from "./logger";
 
 type PlaywrightRole = Parameters<Page["getByRole"]>[0];
 
@@ -26,34 +21,74 @@ export type HealStrategy =
   | "getByText"
   | "css"
   | "xpath"
-  | "dom";
+  | "dom"
+  | "relative-xpath"
+  | "position";
 
 export interface HealResult {
-  locator:   Locator;
-  healed:    boolean;
-  strategy:  HealStrategy;
-  selector?: string;
+  locator:    Locator;
+  healed:     boolean;
+  strategy:   HealStrategy;
+  selector?:  string;
+  confidence: number;
+}
+
+export interface HealContext {
+  testName:  string;
+  testFile:  string;
+  pomMethod: string;
+  pageUrl:   string;
+  pomFile?:  string;
+  pomLine?:  number;
 }
 
 interface RuntimeHints {
-  raw:           string;
-  selector?:     string;
-  tag?:          string;
-  attributes:    Record<string, string>;
-  role?:         PlaywrightRole;
-  name?:         string;
-  label?:        string;
-  placeholder?:  string;
-  texts:         string[];   // ← array now, handles union XPath multiple text values
-  cssSelectors:  string[];
-  xpathSelectors: string[];
+  raw:              string;
+  selector?:        string;
+  tag?:             string;
+  attributes:       Record<string, string>;
+  role?:            PlaywrightRole;
+  name?:            string;
+  label?:           string;
+  placeholder?:     string;
+  texts:            string[];
+  cssSelectors:     string[];
+  xpathSelectors:   string[];
+  lastKnownBounds?: { x: number; y: number; width: number; height: number };
 }
 
 interface HealingAttempt {
-  strategy: Exclude<HealStrategy, "primary">;
-  locator:  Locator;
-  selector: string;
+  strategy:   Exclude<HealStrategy, "primary">;
+  locator:    Locator;
+  selector:   string;
+  confidence: number;
 }
+
+// ── Confidence per strategy ───────────────────────────────────────────────────
+const STRATEGY_CONFIDENCE: Record<Exclude<HealStrategy, "primary">, number> = {
+  getByRole:        0.90,
+  getByLabel:       0.85,
+  getByPlaceholder: 0.80,
+  getByText:        0.75,
+  css:              0.70,
+  xpath:            0.65,
+  dom:              0.60,
+  "relative-xpath": 0.35,
+  position:         0.25,
+};
+
+// ── Timeouts per strategy (ms) ────────────────────────────────────────────────
+const STRATEGY_TIMEOUT: Record<Exclude<HealStrategy, "primary">, number> = {
+  getByRole:        800,
+  getByLabel:       800,
+  getByPlaceholder: 800,
+  getByText:        800,
+  css:              1000,
+  xpath:            1200,
+  dom:              1500,
+  "relative-xpath": 1500,
+  position:         1500,
+};
 
 const ROLE_BY_TAG: Record<string, PlaywrightRole> = {
   a:        "link",
@@ -78,10 +113,13 @@ const INPUT_ROLE_BY_TYPE: Record<string, PlaywrightRole> = {
 
 const SCORED_ATTRS    = ["id", "name", "placeholder", "aria-label", "title", "class", "type"];
 const MAX_HINT_LENGTH = 80;
+const DOM_MIN_SCORE   = 0.45;
 
 // ============================================================================
 //  VISIBILITY
 // ============================================================================
+
+// Always use .first() — if multiple elements match, take the first one
 async function isVisible(locator: Locator, timeout = 1500): Promise<boolean> {
   try {
     await locator.first().waitFor({ state: "visible", timeout });
@@ -122,9 +160,6 @@ function firstMatch(source: string, patterns: RegExp[]): string | undefined {
   return undefined;
 }
 
-// ── FIX: extract ALL text values from union XPath ────────────────────────────
-// e.g. (//span[text()="HOTELS"] | //span[text()="Hotels"])[1]
-// → ["HOTELS", "Hotels"]
 function allTextValues(source: string): string[] {
   const values: string[] = [];
   const patterns = [
@@ -194,11 +229,9 @@ function extractAttributes(source: string): Record<string, string> {
 function extractTag(selector: string | undefined): string | undefined {
   if (!selector) return undefined;
   const normalized = selector.replace(/^xpath=/, "").replace(/^css=/, "").trim();
-  // ── FIX: handle union XPath — extract tag from first branch ─────────────
-  // (//span[text()="HOTELS"] | //span[text()="Hotels"])[1] → "span"
-  const xpathTag = normalized.match(/^[\(\s]*\/\/\s*([a-zA-Z][\w-]*|\*)/)?.[1];
-  const cssTag   = normalized.match(/^([a-zA-Z][\w-]*)/)?.[1];
-  const tag = xpathTag || cssTag;
+  const xpathTag   = normalized.match(/^[\(\s]*\/\/\s*([a-zA-Z][\w-]*|\*)/)?.[1];
+  const cssTag     = normalized.match(/^([a-zA-Z][\w-]*)/)?.[1];
+  const tag        = xpathTag || cssTag;
   return tag && tag !== "*" ? tag.toLowerCase() : undefined;
 }
 
@@ -210,7 +243,7 @@ function inferRole(selector: string | undefined, raw: string): PlaywrightRole | 
   ]);
   if (explicit) return explicit as PlaywrightRole;
   if (!selector) return undefined;
-  const tag = extractTag(selector);
+  const tag       = extractTag(selector);
   if (tag && ROLE_BY_TAG[tag]) return ROLE_BY_TAG[tag];
   const inputType = firstMatch(selector, [
     /input[^"'[\]]*\[type=["']?([^"'\]]+)["']?\]/,
@@ -222,17 +255,9 @@ function inferRole(selector: string | undefined, raw: string): PlaywrightRole | 
   return undefined;
 }
 
-function cssEscape(value: string): string {
-  return value.replace(/([ !"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, "\\$1");
-}
-
-function cssString(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
-function xpathString(value: string): string {
-  return value.replace(/"/g, '\\"');
-}
+function cssEscape(value: string):   string { return value.replace(/([ !"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, "\\$1"); }
+function cssString(value: string):   string { return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"'); }
+function xpathString(value: string): string { return value.replace(/"/g, '\\"'); }
 
 function inferCssSelectors(selector: string | undefined, raw: string): string[] {
   const exactSelector = selector?.startsWith("css=")
@@ -268,41 +293,33 @@ function inferCssSelectors(selector: string | undefined, raw: string): string[] 
 }
 
 function inferXPathSelectors(
-  selector: string | undefined,
-  hints: Partial<RuntimeHints> & { texts?: string[] },
+  selector:   string | undefined,
+  hints:      Partial<RuntimeHints> & { texts?: string[] },
   attributes: Record<string, string> = {}
 ): string[] {
-  // ── For union XPath keep the original as-is ──────────────────────────────
   const exactXPath = selector?.startsWith("xpath=")
     ? selector
     : selector?.startsWith("//") || selector?.startsWith("(")
       ? `xpath=${selector}` : undefined;
 
-  const placeholder = hints.placeholder;
   const selectors: Array<string | undefined> = [exactXPath];
 
-  // ── Add normalized-space selectors for ALL extracted text values ──────────
-  // e.g. "HOTELS" → xpath=//*[normalize-space()="HOTELS"]
-  //      "Hotels" → xpath=//*[normalize-space()="Hotels"]
   for (const t of hints.texts ?? []) {
     selectors.push(`xpath=//*[normalize-space()="${xpathString(t)}"]`);
     selectors.push(`xpath=//*[contains(normalize-space(),"${xpathString(t)}")]`);
   }
 
-  if (placeholder)   selectors.push(`xpath=//*[@placeholder="${xpathString(placeholder)}"]`);
-  if (hints.label)   selectors.push(`xpath=//*[@aria-label="${xpathString(hints.label)}"]`);
+  if (hints.placeholder) selectors.push(`xpath=//*[@placeholder="${xpathString(hints.placeholder)}"]`);
+  if (hints.label)       selectors.push(`xpath=//*[@aria-label="${xpathString(hints.label)}"]`);
 
-  // ── contains() for clean attribute values ────────────────────────────────
   for (const [attr, val] of Object.entries(attributes)) {
-    if (!val || val.length < 3) continue;
-    if (!/^[a-zA-Z][\w-]*$/.test(val)) continue;
+    if (!val || val.length < 3 || !/^[a-zA-Z][\w-]*$/.test(val)) continue;
     const escaped = xpathString(val);
     if (["id", "name", "class"].includes(attr)) {
-      const tag = hints.tag || "*";
-      selectors.push(`xpath=//${tag}[contains(@${attr},"${escaped}")]`);
+      selectors.push(`xpath=//${hints.tag || "*"}[contains(@${attr},"${escaped}")]`);
     }
-    if (attr === "aria-label")   selectors.push(`xpath=//*[contains(@aria-label,"${escaped}")]`);
-    if (attr === "placeholder")  selectors.push(`xpath=//*[contains(@placeholder,"${escaped}")]`);
+    if (attr === "aria-label")  selectors.push(`xpath=//*[contains(@aria-label,"${escaped}")]`);
+    if (attr === "placeholder") selectors.push(`xpath=//*[contains(@placeholder,"${escaped}")]`);
   }
 
   return unique(selectors);
@@ -311,7 +328,10 @@ function inferXPathSelectors(
 // ============================================================================
 //  BUILD HINTS
 // ============================================================================
-function buildHints(locator: Locator): RuntimeHints {
+function buildHints(
+  locator:          Locator,
+  lastKnownBounds?: RuntimeHints["lastKnownBounds"]
+): RuntimeHints {
   const raw        = locator.toString();
   const selector   = extractSelector(raw);
   const attributes = extractAttributes(selector || raw);
@@ -330,11 +350,8 @@ function buildHints(locator: Locator): RuntimeHints {
     /@placeholder=["']([^"']+)["']/,
   ]);
 
-  // ── Extract ALL text values (handles union XPath) ─────────────────────────
   const texts = allTextValues(selector || raw);
-
-  // ── name = accessible name for getByRole ─────────────────────────────────
-  const name = firstMatch(raw, [
+  const name  = firstMatch(raw, [
     /getByRole\(['"`][^'"`]+['"`],\s*\{\s*name:\s*['"`]([^'"`]+)['"`]/,
     /title=["']([^"']+)["']/,
     /@title=["']([^"']+)["']/,
@@ -342,22 +359,16 @@ function buildHints(locator: Locator): RuntimeHints {
 
   const tag  = extractTag(selector);
   const role = inferRole(selector, raw);
+
   const partialHints: Partial<RuntimeHints> & { texts: string[] } = {
     label, name, placeholder, role, texts, tag,
   };
 
   return {
-    raw,
-    selector,
-    tag,
-    attributes,
-    role,
-    name,
-    label,
-    placeholder,
-    texts,
+    raw, selector, tag, attributes, role, name, label, placeholder, texts,
     cssSelectors:   inferCssSelectors(selector, raw),
     xpathSelectors: inferXPathSelectors(selector, partialHints, attributes),
+    lastKnownBounds,
   };
 }
 
@@ -368,11 +379,11 @@ function levenshtein(a: string, b: string): number {
   const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
   for (let i = 1; i <= a.length; i++) {
     let last = i - 1;
-    prev[0] = i;
+    prev[0]  = i;
     for (let j = 1; j <= b.length; j++) {
       const old = prev[j];
-      prev[j] = Math.min(prev[j] + 1, prev[j - 1] + 1, last + (a[i - 1] === b[j - 1] ? 0 : 1));
-      last = old;
+      prev[j]   = Math.min(prev[j] + 1, prev[j - 1] + 1, last + (a[i - 1] === b[j - 1] ? 0 : 1));
+      last      = old;
     }
   }
   return prev[b.length];
@@ -387,8 +398,8 @@ function longestCommonPrefix(a: string, b: string): number {
 function similarity(a: string, b: string): number {
   const left  = a.toLowerCase();
   const right = b.toLowerCase();
-  if (!left || !right) return 0;
-  if (left === right)  return 1;
+  if (!left || !right)  return 0;
+  if (left === right)   return 1;
   if (left.startsWith(right) || right.startsWith(left)) return 0.88;
   if (left.includes(right) || right.includes(left)) {
     return Math.min(left.length, right.length) / Math.max(left.length, right.length);
@@ -401,14 +412,11 @@ function similarity(a: string, b: string): number {
 // ============================================================================
 //  DOM RECOVERY
 // ============================================================================
-async function buildDomRecoveryAttempts(page: Page, hints: RuntimeHints): Promise<HealingAttempt[]> {
-  const scoredAttrs = Object.entries(hints.attributes)
-    .filter(([name]) => SCORED_ATTRS.includes(name));
-
-  // ── FIX: also score against text values from union XPath ─────────────────
-  // For (//span[text()="HOTELS"] | //span[text()="Hotels"])[1]
-  // tag = "span", scoredAttrs = {} (no @attr), texts = ["HOTELS","Hotels"]
-  // Without this fix → returns [] immediately because scoredAttrs is empty
+async function buildDomRecoveryAttempts(
+  page:  Page,
+  hints: RuntimeHints
+): Promise<HealingAttempt[]> {
+  const scoredAttrs  = Object.entries(hints.attributes).filter(([n]) => SCORED_ATTRS.includes(n));
   const hasTextHints = hints.texts.length > 0;
 
   if (!hints.tag) return [];
@@ -429,7 +437,7 @@ async function buildDomRecoveryAttempts(page: Page, hints: RuntimeHints): Promis
         const r = el.getBoundingClientRect();
         return s.visibility !== "hidden" && s.display !== "none" && r.width > 0 && r.height > 0;
       }
-      return elements.filter(isVis).map((el) => {
+      return elements.filter(isVis).map(el => {
         const attrs: Record<string, string> = {};
         for (const name of attrNames) {
           const val = el.getAttribute(name);
@@ -442,7 +450,6 @@ async function buildDomRecoveryAttempts(page: Page, hints: RuntimeHints): Promis
           name:        el.getAttribute("name"),
           ariaLabel:   el.getAttribute("aria-label"),
           placeholder: el.getAttribute("placeholder"),
-          // ── Also capture text content for text-based locators ─────────────
           text:        (el as HTMLElement).innerText?.trim().substring(0, 100) || "",
         };
       });
@@ -452,30 +459,23 @@ async function buildDomRecoveryAttempts(page: Page, hints: RuntimeHints): Promis
 
   const ranked = candidates
     .map(candidate => {
-      // Score against attributes
-      let score = scoredAttrs.reduce((best, [name, expected]) => {
-        const actual = candidate.attrs[name];
+      let score = scoredAttrs.reduce((best, [attrName, expected]) => {
+        const actual = candidate.attrs[attrName];
         return actual ? Math.max(best, similarity(expected, actual)) : best;
       }, 0);
-
-      // ── FIX: also score against text values for text-based locators ───────
-      // e.g. span with text "Hotels" should score high against ["HOTELS","Hotels"]
       if (hasTextHints && candidate.text) {
         for (const t of hints.texts) {
           score = Math.max(score, similarity(t, candidate.text));
         }
       }
-
       return { ...candidate, score };
     })
-    .filter(c => c.score >= 0.4)
+    .filter(c => c.score >= DOM_MIN_SCORE)
     .sort((a, b) => b.score - a.score);
 
-  logger.debug(`[AutoHeal] DOM scan found ${ranked.length} candidates for <${hints.tag}>`);
-  ranked.forEach(c => logger.debug(
-    `  score=${c.score.toFixed(2)} text="${c.text}" attrs=${JSON.stringify(c.attrs)}`
-  ));
+  logger.debug(`[AutoHeal] DOM scan: ${ranked.length} candidates for <${hints.tag}>`);
 
+  // Take top 3 — always .first() applied later in main loop
   return ranked.slice(0, 3).map(candidate => {
     let preciseLocator: Locator;
     let preciseSelector: string;
@@ -496,7 +496,6 @@ async function buildDomRecoveryAttempts(page: Page, hints: RuntimeHints): Promis
       preciseSelector = `[placeholder="${candidate.placeholder}"]`;
       preciseLocator  = page.locator(preciseSelector);
     } else if (candidate.text) {
-      // ── FIX: use text content to build locator for text-only elements ─────
       preciseSelector = `xpath=//${hints.tag}[normalize-space()="${xpathString(candidate.text)}"]`;
       preciseLocator  = page.locator(preciseSelector);
     } else {
@@ -508,60 +507,291 @@ async function buildDomRecoveryAttempts(page: Page, hints: RuntimeHints): Promis
     }
 
     return {
-      strategy: "dom" as const,
-      locator:  preciseLocator,
-      selector: `${preciseSelector} (score=${candidate.score.toFixed(2)} text="${candidate.text}" attrs=${JSON.stringify(candidate.attrs)})`,
+      strategy:   "dom" as const,
+      locator:    preciseLocator,
+      selector:   `${preciseSelector} (score=${candidate.score.toFixed(2)} text="${candidate.text}")`,
+      confidence: candidate.score,
     };
   });
 }
 
 // ============================================================================
-//  HEALING ATTEMPTS
+//  POSITION STRATEGY
+// ============================================================================
+async function buildPositionAttempts(
+  page:  Page,
+  hints: RuntimeHints
+): Promise<HealingAttempt[]> {
+  if (!hints.lastKnownBounds || !hints.tag) return [];
+
+  const bounds = hints.lastKnownBounds;
+  logger.debug(`[AutoHeal] Position — looking near x:${bounds.x} y:${bounds.y}`);
+
+  try {
+    if (page.isClosed()) return [];
+    await page.evaluate(() => document.readyState);
+  } catch {
+    return [];
+  }
+
+  const closest = await page.locator(hints.tag).evaluateAll(
+    (elements, target: { x: number; y: number; width: number; height: number }) => {
+      function isVis(el: Element): boolean {
+        const s = window.getComputedStyle(el);
+        const r = el.getBoundingClientRect();
+        return s.visibility !== "hidden" && s.display !== "none" && r.width > 0 && r.height > 0;
+      }
+      function dist(
+        a: { x: number; y: number; width: number; height: number },
+        b: { x: number; y: number; width: number; height: number }
+      ): number {
+        return Math.sqrt(
+          (a.x + a.width / 2 - (b.x + b.width / 2)) ** 2 +
+          (a.y + a.height / 2 - (b.y + b.height / 2)) ** 2
+        );
+      }
+      function sizeSim(
+        a: { width: number; height: number },
+        b: { width: number; height: number }
+      ): number {
+        return (
+          Math.min(a.width, b.width)   / Math.max(a.width,  b.width  || 1) +
+          Math.min(a.height, b.height) / Math.max(a.height, b.height || 1)
+        ) / 2;
+      }
+      return elements.filter(isVis).map(el => {
+        const r    = el.getBoundingClientRect();
+        const rect = { x: r.x, y: r.y, width: r.width, height: r.height };
+        const d    = dist(rect, target);
+        const score = sizeSim(rect, target) / (1 + d / 100);
+        return {
+          score,
+          distance:  Math.round(d),
+          id:        el.getAttribute("id"),
+          testId:    el.getAttribute("data-testid") || el.getAttribute("data-cy"),
+          name:      el.getAttribute("name"),
+          ariaLabel: el.getAttribute("aria-label"),
+          text:      (el as HTMLElement).innerText?.trim().substring(0, 60) || "",
+        };
+      })
+      .filter(c => c.score > 0.1 && c.distance < 300)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 2);
+    },
+    bounds
+  );
+
+  if (closest.length === 0) return [];
+
+  return closest.map(c => {
+    let selector: string;
+    if      (c.id)        selector = `#${c.id}`;
+    else if (c.testId)    selector = `[data-testid="${c.testId}"]`;
+    else if (c.name)      selector = `${hints.tag}[name="${c.name}"]`;
+    else if (c.ariaLabel) selector = `[aria-label="${c.ariaLabel}"]`;
+    else if (c.text)      selector = `xpath=//${hints.tag}[normalize-space()="${xpathString(c.text)}"]`;
+    else                  selector = hints.tag!;
+
+    return {
+      strategy:   "position" as const,
+      locator:    page.locator(selector),
+      selector:   `${selector}  [position dist=${c.distance}px]`,
+      confidence: STRATEGY_CONFIDENCE["position"],
+    };
+  });
+}
+
+// ============================================================================
+//  RELATIVE XPATH RECOVERY
+// ============================================================================
+async function buildRelativeXPathAttempts(
+  page:  Page,
+  hints: RuntimeHints
+): Promise<HealingAttempt[]> {
+  if (!hints.tag && hints.texts.length === 0) return [];
+
+  try {
+    if (page.isClosed()) return [];
+    await page.evaluate(() => document.readyState);
+  } catch {
+    return [];
+  }
+
+  const targetTag = hints.tag || "*";
+
+  const anchors = await page.evaluate((tt: string) => {
+    const stableElements = Array.from(
+      document.querySelectorAll("label,h1,h2,h3,h4,h5,legend,th,button,a,span,p,div")
+    ).filter(el => {
+      const text = (el as HTMLElement).innerText?.trim();
+      const rect = el.getBoundingClientRect();
+      return text && text.length > 1 && text.length < 60 && rect.width > 0 && rect.height > 0;
+    });
+
+    function getXPath(el: Element): string {
+      const id = el.getAttribute("id");
+      if (id) return `//*[@id="${id}"]`;
+      const parts: string[] = [];
+      let cur: Element | null = el;
+      while (cur && cur.nodeType === Node.ELEMENT_NODE) {
+        let idx = 1;
+        let sib = cur.previousElementSibling;
+        while (sib) { if (sib.tagName === cur.tagName) idx++; sib = sib.previousElementSibling; }
+        parts.unshift(idx === 1 ? cur.tagName.toLowerCase() : `${cur.tagName.toLowerCase()}[${idx}]`);
+        cur = cur.parentElement;
+      }
+      return "/" + parts.join("/");
+    }
+
+    const results: Array<{ tag: string; text: string; id?: string; xpath: string; relation: string }> = [];
+
+    for (const anchor of stableElements.slice(0, 100)) {
+      const anchorText = (anchor as HTMLElement).innerText?.trim();
+      if (!anchorText) continue;
+      const anchorXPath = getXPath(anchor);
+
+      const followSib = anchor.nextElementSibling;
+      if (followSib && followSib.tagName.toLowerCase() === tt) {
+        results.push({ tag: anchor.tagName.toLowerCase(), text: anchorText, id: anchor.getAttribute("id") || undefined, xpath: anchorXPath, relation: "sibling" });
+      }
+
+      const parent = anchor.closest("form,fieldset,section,div,nav,table,ul,ol");
+      if (parent) {
+        const childTargets = parent.querySelectorAll(tt);
+        if (childTargets.length > 0 && childTargets.length < 5) {
+          results.push({ tag: parent.tagName.toLowerCase(), text: parent.getAttribute("id") || parent.getAttribute("class")?.split(" ")[0] || "", id: parent.getAttribute("id") || undefined, xpath: getXPath(parent), relation: "ancestor" });
+        }
+      }
+
+      const allTargets = anchor.closest("body")?.querySelectorAll(tt);
+      if (allTargets) {
+        for (const target of Array.from(allTargets).slice(0, 3)) {
+          const aRect = anchor.getBoundingClientRect();
+          const tRect = target.getBoundingClientRect();
+          if (tRect.top > aRect.bottom && tRect.top - aRect.bottom < 200) {
+            results.push({ tag: anchor.tagName.toLowerCase(), text: anchorText, id: anchor.getAttribute("id") || undefined, xpath: anchorXPath, relation: "following" });
+            break;
+          }
+        }
+      }
+    }
+
+    return results.slice(0, 20);
+  }, targetTag);
+
+  if (anchors.length === 0) return [];
+
+  const attempts: HealingAttempt[] = [];
+  const seen = new Set<string>();
+
+  for (const anchor of anchors) {
+    const anchorBase = anchor.id
+      ? `//*[@id="${anchor.id}"]`
+      : `//${anchor.tag}[normalize-space()="${xpathString(anchor.text)}"]`;
+
+    const expressions: Array<{ xpath: string; label: string }> = [];
+
+    switch (anchor.relation) {
+      case "sibling":
+        expressions.push(
+          { xpath: `xpath=${anchorBase}/following-sibling::${targetTag}[1]`, label: `following-sibling of "${anchor.text}"` },
+          { xpath: `xpath=${anchorBase}/preceding-sibling::${targetTag}[1]`, label: `preceding-sibling of "${anchor.text}"` }
+        );
+        break;
+      case "ancestor":
+        if (anchor.id) {
+          expressions.push(
+            { xpath: `xpath=//*[@id="${anchor.id}"]//${targetTag}[1]`, label: `first descendant of #${anchor.id}` }
+          );
+        }
+        break;
+      case "following":
+        expressions.push(
+          { xpath: `xpath=${anchorBase}/following::${targetTag}[1]`, label: `first following ${targetTag} after "${anchor.text}"` },
+          { xpath: `xpath=${anchorBase}/following::${targetTag}[2]`, label: `second following ${targetTag} after "${anchor.text}"` }
+        );
+        if (hints.attributes["type"]) {
+          expressions.push({ xpath: `xpath=${anchorBase}/following::${targetTag}[@type="${hints.attributes["type"]}"][1]`, label: `following typed ${targetTag} after "${anchor.text}"` });
+        }
+        break;
+      case "preceding":
+        expressions.push(
+          { xpath: `xpath=${anchorBase}/preceding::${targetTag}[1]`, label: `preceding ${targetTag} before "${anchor.text}"` }
+        );
+        break;
+    }
+
+    // Parent axis
+    for (const text of hints.texts) {
+      expressions.push(
+        { xpath: `xpath=//*[normalize-space()="${xpathString(text)}"]/parent::${targetTag}`,      label: `parent of "${text}"` },
+        { xpath: `xpath=//*[normalize-space()="${xpathString(text)}"]/ancestor::${targetTag}[1]`, label: `ancestor of "${text}"` }
+      );
+    }
+
+    for (const expr of expressions) {
+      if (seen.has(expr.xpath)) continue;
+      seen.add(expr.xpath);
+      attempts.push({
+        strategy:   "relative-xpath",
+        locator:    page.locator(expr.xpath),
+        selector:   `${expr.xpath}  [${expr.label}]`,
+        confidence: STRATEGY_CONFIDENCE["relative-xpath"],
+      });
+    }
+  }
+
+  return attempts;
+}
+
+// ============================================================================
+//  STANDARD HEALING ATTEMPTS
 // ============================================================================
 function buildHealingAttempts(page: Page, hints: RuntimeHints): HealingAttempt[] {
   const attempts: HealingAttempt[] = [];
 
   if (hints.role && hints.name) {
     attempts.push({
-      strategy: "getByRole",
-      locator:  page.getByRole(hints.role, { name: hints.name, exact: false }),
-      selector: `getByRole(${hints.role}, name=${hints.name})`,
+      strategy:   "getByRole",
+      locator:    page.getByRole(hints.role, { name: hints.name, exact: false }),
+      selector:   `getByRole(${hints.role}, name=${hints.name})`,
+      confidence: STRATEGY_CONFIDENCE["getByRole"],
     });
   }
 
   if (hints.label) {
     attempts.push({
-      strategy: "getByLabel",
-      locator:  page.getByLabel(hints.label, { exact: false }),
-      selector: `getByLabel(${hints.label})`,
+      strategy:   "getByLabel",
+      locator:    page.getByLabel(hints.label, { exact: false }),
+      selector:   `getByLabel(${hints.label})`,
+      confidence: STRATEGY_CONFIDENCE["getByLabel"],
     });
   }
 
   if (hints.placeholder) {
     attempts.push({
-      strategy: "getByPlaceholder",
-      locator:  page.getByPlaceholder(hints.placeholder, { exact: false }),
-      selector: `getByPlaceholder(${hints.placeholder})`,
+      strategy:   "getByPlaceholder",
+      locator:    page.getByPlaceholder(hints.placeholder, { exact: false }),
+      selector:   `getByPlaceholder(${hints.placeholder})`,
+      confidence: STRATEGY_CONFIDENCE["getByPlaceholder"],
     });
   }
 
-  // ── FIX: try ALL text values from union XPath, not just one ──────────────
-  // Original: tried getByText("HOTELS") only → failed because page shows "Hotels"
-  // Fixed:    tries getByText("HOTELS") AND getByText("Hotels") → one will match
   for (const text of hints.texts) {
     attempts.push({
-      strategy: "getByText",
-      locator:  page.getByText(text, { exact: false }),
-      selector: `getByText(${text})`,
+      strategy:   "getByText",
+      locator:    page.getByText(text, { exact: false }),
+      selector:   `getByText(${text})`,
+      confidence: STRATEGY_CONFIDENCE["getByText"],
     });
   }
 
   for (const selector of hints.cssSelectors) {
-    attempts.push({ strategy: "css",   locator: page.locator(selector), selector });
+    attempts.push({ strategy: "css",   locator: page.locator(selector), selector, confidence: STRATEGY_CONFIDENCE["css"] });
   }
 
   for (const selector of hints.xpathSelectors) {
-    attempts.push({ strategy: "xpath", locator: page.locator(selector), selector });
+    attempts.push({ strategy: "xpath", locator: page.locator(selector), selector, confidence: STRATEGY_CONFIDENCE["xpath"] });
   }
 
   return attempts;
@@ -570,53 +800,78 @@ function buildHealingAttempts(page: Page, hints: RuntimeHints): HealingAttempt[]
 // ============================================================================
 //  MAIN
 // ============================================================================
-export async function autoHeal(locator: Locator, timeout = 3000): Promise<HealResult> {
+export async function autoHeal(
+  locator:          Locator,
+  context?:         HealContext,
+  timeoutOverride?: number
+): Promise<HealResult> {
 
   // ── Primary ───────────────────────────────────────────────────────────────
-  if (await isVisible(locator, timeout)) {
-    return { locator, healed: false, strategy: "primary" };
+  if (await isVisible(locator, timeoutOverride ?? 3000)) {
+    return { locator: locator.first(), healed: false, strategy: "primary", confidence: 1.0 };
   }
 
-  const page    = locator.page();
-
-  // ── Guard: page closed or navigating ─────────────────────────────────────
+  const page = locator.page();
   try {
-    if (page.isClosed()) return { locator, healed: false, strategy: "primary" };
+    if (page.isClosed()) return { locator, healed: false, strategy: "primary", confidence: 0 };
   } catch {
-    return { locator, healed: false, strategy: "primary" };
+    return { locator, healed: false, strategy: "primary", confidence: 0 };
   }
 
-  const hints   = buildHints(locator);
-  const attempts = [
-    ...buildHealingAttempts(page, hints),
-    ...await buildDomRecoveryAttempts(page, hints),
-  ];
+  const lastKnownBounds = (locator as any)._lastKnownBounds;
+  const hints           = buildHints(locator, lastKnownBounds);
+
+  const standard = buildHealingAttempts(page, hints);
+  const domBased = await buildDomRecoveryAttempts(page, hints);
+  const relative = await buildRelativeXPathAttempts(page, hints);
+  const position = await buildPositionAttempts(page, hints);
+
+  const attempts = [...standard, ...domBased, ...relative, ...position];
 
   logger.warn(
-    `[AutoHeal] Primary not visible — ${attempts.length} recovery candidates built -> ${hints.raw}`
+    `[AutoHeal] Primary not visible — ` +
+    `${standard.length} standard + ${domBased.length} DOM + ` +
+    `${relative.length} relative + ${position.length} position = ` +
+    `${attempts.length} total → ${hints.raw}`
   );
 
-  // ── Try each strategy ─────────────────────────────────────────────────────
-  for (let i = 0; i < attempts.length; i++) {
-    const attempt = attempts[i];
-    if (await isVisible(attempt.locator, 1200)) {
-      logger.pass(
-        `[AutoHeal] Healed on attempt ${i + 1}/${attempts.length}` +
-        ` via [${attempt.strategy}] -> ${attempt.selector}`
-      );
-      logger.warn(
-        `[AutoHeal] 💡 UPDATE YOUR POM: replace broken locator with -> ${attempt.selector.split(" (")[0]}`
-      );
-      return {
-        locator:  attempt.locator.first(),
-        healed:   true,
-        strategy: attempt.strategy,
-        selector: attempt.selector,
-      };
+  // ── Try each strategy — always use .first() if multiple elements match ────
+  for (const attempt of attempts) {
+    const timeout = STRATEGY_TIMEOUT[attempt.strategy] ?? 1200;
+
+    const visible = await isVisible(attempt.locator, timeout);
+
+    if (!visible) {
+      logger.debug(`[AutoHeal] [${attempt.strategy}] no match → ${attempt.selector.substring(0, 80)}`);
+      continue;
     }
-    logger.debug(`[AutoHeal] [${attempt.strategy}] no match -> ${attempt.selector}`);
+
+    // Multiple elements may match — always take .first()
+    const resolved = attempt.locator.first();
+
+    logger.pass(
+      `[AutoHeal] ✅ Healed via [${attempt.strategy}] confidence: ${(attempt.confidence * 100).toFixed(0)}%\n` +
+      `  Selector : ${attempt.selector.split("  [")[0]}\n` +
+      (attempt.strategy === "relative-xpath"
+        ? `  Relation : ${attempt.selector.split("  [")[1]?.replace("]", "")}\n`
+        : "") +
+      `  💡 UPDATE YOUR POM → ${attempt.selector.split(" (")[0].split("  [")[0]}`
+    );
+
+    return {
+      locator:    resolved,
+      healed:     true,
+      strategy:   attempt.strategy,
+      selector:   attempt.selector,
+      confidence: attempt.confidence,
+    };
   }
 
-  logger.error(`[AutoHeal] All ${attempts.length} strategies failed -> ${hints.raw}`);
-  return { locator, healed: false, strategy: "primary" };
+  logger.error(
+    `[AutoHeal] ❌ All ${attempts.length} strategies failed\n` +
+    `  Original : ${hints.raw}\n` +
+    `  Tag: ${hints.tag ?? "unknown"} | Texts: [${hints.texts.join(", ")}] | Label: ${hints.label ?? "none"}`
+  );
+
+  return { locator, healed: false, strategy: "primary", confidence: 0 };
 }

@@ -93,7 +93,7 @@ export class ElementUtils {
   }
 
   // ============================================================================
-  // CLICK (WITH AUTO-HEAL + BLUECOPA CANVAS FIX)
+  // CLICK (WITH AUTO-HEAL +  CANVAS FIX)
   // ----------------------------------------------------------------------------
   /**
    * Clicks the element, safely + reliably.

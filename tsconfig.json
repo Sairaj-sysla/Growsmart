@@ -1,9 +1,9 @@
 {
   "compilerOptions": {
     "target": "ES2020",
-    "module": "commonjs",
+    "module": "node16",
     "lib": ["ES2020", "DOM"],
-    "moduleResolution": "bundler",
+    "moduleResolution": "node16",
     "resolveJsonModule": true,
     "isolatedModules": false,
     "skipLibCheck": true,
@@ -13,9 +13,9 @@
     "strict": true,
     "noImplicitAny": true,
     "strictNullChecks": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noImplicitReturns": true,
+    "noUnusedLocals":     false,
+    "noUnusedParameters": false,
+    "noImplicitReturns":  true,
 
     "outDir": "./dist",
     "sourceMap": true,

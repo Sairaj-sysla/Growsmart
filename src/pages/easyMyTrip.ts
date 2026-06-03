@@ -45,6 +45,9 @@ export class EasyMyTripPage extends BasePage {
     //cleanCheckIn: string = "";
    // cleanCheckOut: string = "";
    CityName: Locator;
+   FormatDate: Locator;
+   DateAfterDays: Locator;
+  cityName:Locator;
 
   constructor(page: Page) {
     super(page);
@@ -80,6 +83,10 @@ export class EasyMyTripPage extends BasePage {
      this.check_Out=this.getLocator('(//p[contains(@class,"fnt")])[2]');
      this.check_out_date=this.getLocator('//div[text()="Check-Out"]/../..//input[@type="text"]'); 
      this.CityName = this.getLocator('(//div[contains(text(),"Kolar")])[2]');
+     this.FormatDate = this.getLocator(`(//*[text()="${formatDateAfterDays(1, "dd")}"])[1]`);
+     this.DateAfterDays = this.getLocator(`(//*[text()="${formatDateAfterDays(3, "dd")}"])[last()]`);
+     this.cityName =this.getLocator('//span[@class="hp_city"]');
+    
   }
 
   async navigateToEasyMyTrip() {
@@ -98,18 +105,29 @@ export class EasyMyTripPage extends BasePage {
     await this.waitForElementIsVisible(this.CityName);
     await this.click(this.CityName);
    
-    this.enteredCityName = await this.page.locator('//span[@class="hp_city"]').textContent() || "";
-     //await this.storeInputValue(this.enteredCityName,"cityname")
-    //console.log("Entered City Name: ", this.enteredCityName);
+    
+     //await this.storeTextContent(this.cityName,"cityname")
+    //console.log("Entered City Name: ", this.cityName);
   }
 
   async selectCheckInCheckOutDate() {
-    await this.click(this.check_In);
-    const checkInDate = formatDateAfterDays(2, "dd");
-    await this.page.locator(`(//*[text()="${checkInDate}"])[1]`).click();
-    await this.click(this.check_out);
+    //const checkInDate = formatDateAfterDays(2, "dd");
+   //const  futureDate= this.page.locator(`(//*[text()="${checkInDate}"])[1]`);
+
+    if(!(await this.FormatDate.isVisible())) {
+      await this.click(this.check_In);
+    }else {
+      await this.click(this.FormatDate);
+    }
+   
+   
+    if(!(await this.DateAfterDays.isVisible())) {
+         await this.click(this.check_out);
+    }else {
+      await this.click(this.DateAfterDays);
+    }
     const checkOutDate = formatDateAfterDays(3, "dd");
-    await this.page.locator(`(//*[text()="${checkOutDate}"])[last()]`).click();
+    //await this.page.locator(`(//*[text()="${checkOutDate}"])[last()]`).click();
     await this.storeTextContent(this.Check_in, "RawCheckIn");
     await this.storeTextContent(this.check_Out, "RawCheckOut");
   Runtime.set("CleanCheckIn", cleanAndConvertToDDMMYYYY($("RawCheckIn")));
@@ -124,8 +142,9 @@ console.log("Converted Check-Out:", $("CleanCheckOut"));;
 
   async selectRoomsAndGuests() {
    
-    await this.waitForElementIsVisible(this.room_guests);
-    if (!(await this.room_guests.isVisible())) {
+   
+    if(!(await this.adult_count.isVisible())) {
+
       await this.click(this.room_guests);
     }
 
@@ -205,8 +224,8 @@ console.log("Converted Check-Out:", $("CleanCheckOut"));;
                 (await this.afterenteredCityName.textContent())?.trim() || 
                 (await this.afterenteredCityName.inputValue())?.trim() || "";
     
-    console.log("Expected City Name: ", this.enteredCityName);
-    console.log("Actual City Name from page: ", this.Name);
+    //console.log("Expected City Name: ", this.enteredCityName);
+    console.log("City Name from page: ", this.Name);
     
  
    

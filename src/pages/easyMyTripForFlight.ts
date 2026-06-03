@@ -71,7 +71,7 @@ export class EasyMyTripPageForFlight extends BasePage {
     this.ContinueTocheckout  = this.getLocator('//*[text()="Continue To checkout"]');
     this.FlightDetails       = this.getLocator('//div[@class="air-nme"]');
     this.flightId            = this.getLocator('//div[@class="aircode"]');
-    this.fromField             = this.getLocator('//*[contains(text(),"From")]');
+    this.fromField             = this.getLocator('(//*[contains(text(),"From")])[1]');
     
   }
 

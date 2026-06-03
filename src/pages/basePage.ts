@@ -1,58 +1,17 @@
 // ============================================================================
-//  BASE PAGE - ENTERPRISE LEVEL
+//  BASE PAGE - ENTERPRISE LEVEL v2
 // ----------------------------------------------------------------------------
-//  HOW IT WORKS:
-//  ------------
-//  BasePage is the foundation for ALL page objects in this framework.
-//
-//  FLOW:
-//  Test → PageObject.someAction() → BasePage.click() → ElementUtils.click()
-//                                                     → RetryUtils.retry()
-//                                                     → ErrorHandler.handle()
-//
-//  LAYERS:
-//  ┌─────────────────────────────────┐
-//  │  Test File (.spec.ts)           │  ← calls page object methods
-//  ├─────────────────────────────────┤
-//  │  Page Object (LoginPage, etc.)  │  ← extends BasePage
-//  ├─────────────────────────────────┤
-//  │  BasePage (this file)           │  ← wraps all actions with logging
-//  ├─────────────────────────────────┤
-//  │  ElementUtils / WaitUtils       │  ← low-level Playwright wrappers
-//  ├─────────────────────────────────┤
-//  │  RetryUtils / ErrorHandler      │  ← retry + error capture
-//  └─────────────────────────────────┘
-//
-//  AUTO-HEAL COVERAGE:
-//  -------------------
-//  ✔ click / fill / type          → via ElementUtils (always)
-//  ✔ doubleClick / rightClick     → direct autoHeal call
-//  ✔ hover / focus / press        → direct autoHeal call
-//  ✔ check / uncheck              → direct autoHeal call
-//  ✔ selectOption                 → direct autoHeal call
-//  ✔ waitForElementIsVisible      → heals before waiting
-//  ✔ waitForElementToDisappear    → heals before waiting
-//  ✔ waitForElementEnabled        → heals before checking
-//  ✔ getText                      → heals before reading
-//  ✔ getInputValue                → heals before reading
-//  ✔ scrollToElement              → heals before scrolling
-//
-//  getLocator vs getElementName:
-//  ─────────────────────────────
-//  getLocator()     → converts string/XPath to Playwright Locator (for browser)
-//  getElementName() → extracts human-readable name for logs only (never touches browser)
-// ============================================================================
 
 import { Page, Locator, FrameLocator, expect } from "@playwright/test";
-import { ElementUtils } from "../utils/elementUtils";
-import { WaitUtils } from "../utils/waitUtils";
-import { ErrorHandler } from "../utils/errorHandler";
-import { RetryOptions } from "../utils/retryUtils";
-import { configManager } from "../config/env.index";
+import { ElementUtils }   from "../utils/elementUtils";
+import { WaitUtils }      from "../utils/waitUtils";
+import { ErrorHandler }   from "../utils/errorHandler";
+import { RetryOptions }   from "../utils/retryUtils";
+import { configManager }  from "../config/env.index";
 import { Global_Timeout } from "../config/globalTimeout";
-import { Runtime } from "../utils/runtimeStore";
-import { logger } from "../utils/logger";
-import { autoHeal } from "../utils/autoHeal";
+import { Runtime }        from "../utils/runtimeStore";
+import { logger }         from "../utils/logger";
+import { autoHeal }       from "../utils/autoHeal";
 
 export class BasePage {
   protected page: Page;
@@ -64,12 +23,6 @@ export class BasePage {
 
   // ==========================================================================
   //  SELECTOR NORMALIZATION + AUTO-NAME
-  // --------------------------------------------------------------------------
-  //  getLocator()     → converts any selector into a Playwright Locator
-  //                     used by every action method to interact with browser
-  //
-  //  getElementName() → extracts a readable string label for log messages
-  //                     never touches the browser — logs only
   // ==========================================================================
 
   protected getLocator(selector: string | Locator): Locator {
@@ -89,13 +42,13 @@ export class BasePage {
     if (explicitLabel) return explicitLabel;
     try {
       if (typeof selector !== "string") {
+        // Try to find property name on the page object
+        for (const key of Object.getOwnPropertyNames(this)) {
+          if ((this as any)[key] === selector) return key;
+        }
+        // Try to extract from locator string
         try {
-          for (const key of Object.getOwnPropertyNames(this)) {
-            if ((this as any)[key] === selector) return key;
-          }
-        } catch { /* ignore */ }
-        try {
-          const s = selector.toString();
+          const s          = selector.toString();
           const roleMatch  = s.match(/getByRole\((.*?)\)/);
           const textMatch  = s.match(/getByText\((.*?)\)/);
           const testMatch  = s.match(/getByTestId\((.*?)\)/);
@@ -107,29 +60,52 @@ export class BasePage {
           if (cssMatch)   return this.extractLabelFromSelector(cssMatch[1]);
           if (xpathMatch) return this.extractLabelFromSelector(xpathMatch[1]);
         } catch { /* ignore */ }
-        return "UnknownElement";
+        return "element";
       }
       return this.extractLabelFromSelector(selector);
-    } catch (error: any) {
-      logger.error(`getElementName failed: ${error.message}`);
-      return "UnknownElement";
+    } catch {
+      return "element";
     }
   }
 
   private extractLabelFromSelector(selector: string): string {
+    // ── FIX: guard against undefined/null input ───────────────────────────
+    if (!selector || typeof selector !== "string") return "element";
     try {
-      let clean = selector.replace(/^css=/, "").replace(/^xpath=/, "").trim();
+      const clean = selector.replace(/^css=/, "").replace(/^xpath=/, "").trim();
+      if (!clean) return "element";
       if (clean.startsWith("#")) return clean.slice(1);
-      if (clean.startsWith(".")) return clean.replace(/\./g, "-");
-      const textMatch = clean.match(/text\((.*?)\)|text=['"](.*?)['"]/);
-      if (textMatch) return (textMatch[1] || textMatch[2]).trim().replace(/\s+/g, "_");
+      if (clean.startsWith(".")) return clean.replace(/\./g, "-").replace(/^-/, "");
+
+      // Extract text content from XPath text() or normalize-space()
+      const textMatch = clean.match(/text\(\)\s*=\s*["']([^"']+)["']/) ||
+                        clean.match(/normalize-space\(\)\s*=\s*["']([^"']+)["']/) ||
+                        clean.match(/contains\(text\(\),\s*["']([^"']+)["']\)/);
+      if (textMatch?.[1]) return textMatch[1].trim().replace(/\s+/g, "_").substring(0, 30);
+
+      // Extract attribute value (id, name, placeholder, aria-label)
+      const attrMatch = clean.match(/@id=["']([^"']+)["']/) ||
+                        clean.match(/@name=["']([^"']+)["']/) ||
+                        clean.match(/@placeholder=["']([^"']+)["']/) ||
+                        clean.match(/@aria-label=["']([^"']+)["']/);
+      if (attrMatch?.[1]) return attrMatch[1].trim().substring(0, 30);
+
+      // Extract data-testid
+      const testIdMatch = clean.match(/data-testid=["']([^"']+)["']/);
+      if (testIdMatch?.[1]) return testIdMatch[1];
+
+      // Fallback: clean up XPath/CSS to readable string
       if (clean.startsWith("//") || clean.includes("@")) {
-        return clean.replace(/[^a-zA-Z0-9]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").substring(0, 30);
+        return clean
+          .replace(/[^a-zA-Z0-9\s]+/g, "-")
+          .replace(/-+/g, "-")
+          .replace(/^-|-$/g, "")
+          .substring(0, 30) || "element";
       }
-      return clean.substring(0, 30);
-    } catch (error: any) {
-      logger.error(`extractLabelFromSelector failed: ${error.message}`);
-      return "unknown-selector";
+
+      return clean.substring(0, 30) || "element";
+    } catch {
+      return "element";
     }
   }
 
@@ -137,11 +113,6 @@ export class BasePage {
   //  NAVIGATION
   // ==========================================================================
 
-  /**
-   * navigateTo — navigate to absolute URL.
-   * Uses "load" state 
-   * continuous background requests that never reach networkidle.
-   */
   async navigateTo(url: string): Promise<this> {
     logger.step(`Navigate To → ${url}`);
     return ErrorHandler.handle<this>(async () => {
@@ -150,11 +121,8 @@ export class BasePage {
           waitUntil: "domcontentloaded",
           timeout:   Global_Timeout.navigation,
         });
-        // ── "load" not "networkidle" ──────────────────────────────────────
-        // networkidle never fires on sites with continuous background XHR
-        // load fires once all initial resources are downloaded
         await WaitUtils.waitForLoadState(this.page, "load", Global_Timeout.navigation);
-        logger.pass(`Navigated to → ${url}`);
+        logger.pass(`Navigated → ${url}`);
         return this;
       } catch (error: any) {
         logger.error(`navigateTo failed → ${url} → ${error.message}`);
@@ -163,10 +131,6 @@ export class BasePage {
     }, { context: `BasePage.navigateTo (${url})` });
   }
 
-  /**
-   * goto — navigate using baseURL + relative path.
-   * @example await this.goto("/login");
-   */
   async goto(path = "/"): Promise<this> {
     const fullUrl = `${configManager.getBaseURL()}${path}`;
     logger.step(`Goto → ${fullUrl}`);
@@ -200,7 +164,7 @@ export class BasePage {
     return ErrorHandler.handle<this>(async () => {
       try {
         await this.page.goBack({ waitUntil: "domcontentloaded" });
-        logger.pass("Navigation back successful");
+        logger.pass("Back navigation done");
         return this;
       } catch (error: any) {
         logger.error(`goBack failed → ${error.message}`);
@@ -214,7 +178,7 @@ export class BasePage {
     return ErrorHandler.handle<this>(async () => {
       try {
         await this.page.goForward({ waitUntil: "domcontentloaded" });
-        logger.pass("Navigation forward successful");
+        logger.pass("Forward navigation done");
         return this;
       } catch (error: any) {
         logger.error(`goForward failed → ${error.message}`);
@@ -224,7 +188,7 @@ export class BasePage {
   }
 
   // ==========================================================================
-  //  ELEMENT ACTIONS — all with auto-heal via ElementUtils or direct autoHeal
+  //  ELEMENT ACTIONS
   // ==========================================================================
 
   async click(
@@ -232,10 +196,13 @@ export class BasePage {
     options?: { force?: boolean; label?: string; retryOptions?: RetryOptions }
   ): Promise<this> {
     const name = this.getElementName(selector, options?.label);
-    logger.debug(`Click → ${name}`);
+    logger.step(`Click → ${name}`);
     return ErrorHandler.handle<this>(async () => {
       try {
-        await ElementUtils.click(this.getLocator(selector), { timeout: Global_Timeout.action, ...options, label: name });
+        await ElementUtils.click(
+          this.getLocator(selector),
+          { timeout: Global_Timeout.action, ...options, label: name }
+        );
         logger.pass(`Clicked → ${name}`);
         return this;
       } catch (error: any) {
@@ -247,13 +214,13 @@ export class BasePage {
 
   async doubleClick(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    logger.debug(`Double Click → ${name}`);
+    logger.step(`Double Click → ${name}`);
     return ErrorHandler.handle<this>(async () => {
       try {
         const { locator: healed, healed: wasHealed, strategy } =
-          await autoHeal(this.getLocator(selector), Global_Timeout.action);
+          await autoHeal(this.getLocator(selector), undefined, Global_Timeout.action);
         if (wasHealed) logger.warn(`[AutoHeal] doubleClick healed via [${strategy}] → ${name}`);
-        await healed.dblclick({ timeout: Global_Timeout.action });
+        await healed.first().dblclick({ timeout: Global_Timeout.action });
         logger.pass(`Double-clicked → ${name}`);
         return this;
       } catch (error: any) {
@@ -265,13 +232,13 @@ export class BasePage {
 
   async rightClick(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    logger.debug(`Right Click → ${name}`);
+    logger.step(`Right Click → ${name}`);
     return ErrorHandler.handle<this>(async () => {
       try {
         const { locator: healed, healed: wasHealed, strategy } =
-          await autoHeal(this.getLocator(selector), Global_Timeout.action);
+          await autoHeal(this.getLocator(selector), undefined, Global_Timeout.action);
         if (wasHealed) logger.warn(`[AutoHeal] rightClick healed via [${strategy}] → ${name}`);
-        await healed.click({ button: "right", timeout: Global_Timeout.action });
+        await healed.first().click({ button: "right", timeout: Global_Timeout.action });
         logger.pass(`Right-clicked → ${name}`);
         return this;
       } catch (error: any) {
@@ -287,10 +254,14 @@ export class BasePage {
     options?: { label?: string; retryOptions?: RetryOptions }
   ): Promise<this> {
     const name = this.getElementName(selector, options?.label);
-    logger.debug(`Fill → ${name} | Value: "${text}"`);
+    logger.step(`Fill → ${name} | "${text}"`);
     return ErrorHandler.handle<this>(async () => {
       try {
-        await ElementUtils.fill(this.getLocator(selector), text, { timeout: Global_Timeout.action, ...options, label: name });
+        await ElementUtils.fill(
+          this.getLocator(selector),
+          text,
+          { timeout: Global_Timeout.action, ...options, label: name }
+        );
         logger.pass(`Filled → ${name}`);
         return this;
       } catch (error: any) {
@@ -307,10 +278,14 @@ export class BasePage {
     options?: { label?: string; retryOptions?: RetryOptions }
   ): Promise<this> {
     const name = this.getElementName(selector, options?.label);
-    logger.debug(`Type → ${name} | Value: "${text}" | Delay: ${delay ?? 50}ms`);
+    logger.step(`Type → ${name} | "${text}"`);
     return ErrorHandler.handle<this>(async () => {
       try {
-        await ElementUtils.type(this.getLocator(selector), text, { timeout: Global_Timeout.action, delay, ...options, label: name });
+        await ElementUtils.type(
+          this.getLocator(selector),
+          text,
+          { timeout: Global_Timeout.action, delay, ...options, label: name }
+        );
         logger.pass(`Typed → ${name}`);
         return this;
       } catch (error: any) {
@@ -322,7 +297,7 @@ export class BasePage {
 
   async clear(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    logger.debug(`Clear → ${name}`);
+    logger.step(`Clear → ${name}`);
     return ErrorHandler.handle<this>(async () => {
       try {
         await ElementUtils.clear(this.getLocator(selector));
@@ -337,14 +312,14 @@ export class BasePage {
 
   async selectOption(selector: string | Locator, value: string | string[]): Promise<this> {
     const name = this.getElementName(selector);
-    logger.debug(`Select Option → ${name} | Value: ${JSON.stringify(value)}`);
+    logger.step(`Select → ${name} | ${JSON.stringify(value)}`);
     return ErrorHandler.handle<this>(async () => {
       try {
         const { locator: healed, healed: wasHealed, strategy } =
-          await autoHeal(this.getLocator(selector), Global_Timeout.action);
+          await autoHeal(this.getLocator(selector), undefined, Global_Timeout.action);
         if (wasHealed) logger.warn(`[AutoHeal] selectOption healed via [${strategy}] → ${name}`);
-        await healed.selectOption(value, { timeout: Global_Timeout.action });
-        logger.pass(`Selected option → ${name}`);
+        await healed.first().selectOption(value, { timeout: Global_Timeout.action });
+        logger.pass(`Selected → ${name}`);
         return this;
       } catch (error: any) {
         logger.error(`selectOption failed → ${name} → ${error.message}`);
@@ -355,13 +330,13 @@ export class BasePage {
 
   async check(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    logger.debug(`Check → ${name}`);
+    logger.step(`Check → ${name}`);
     return ErrorHandler.handle<this>(async () => {
       try {
         const { locator: healed, healed: wasHealed, strategy } =
-          await autoHeal(this.getLocator(selector), Global_Timeout.action);
+          await autoHeal(this.getLocator(selector), undefined, Global_Timeout.action);
         if (wasHealed) logger.warn(`[AutoHeal] check healed via [${strategy}] → ${name}`);
-        await healed.check({ timeout: Global_Timeout.action });
+        await healed.first().check({ timeout: Global_Timeout.action });
         logger.pass(`Checked → ${name}`);
         return this;
       } catch (error: any) {
@@ -373,13 +348,13 @@ export class BasePage {
 
   async uncheck(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    logger.debug(`Uncheck → ${name}`);
+    logger.step(`Uncheck → ${name}`);
     return ErrorHandler.handle<this>(async () => {
       try {
         const { locator: healed, healed: wasHealed, strategy } =
-          await autoHeal(this.getLocator(selector), Global_Timeout.action);
+          await autoHeal(this.getLocator(selector), undefined, Global_Timeout.action);
         if (wasHealed) logger.warn(`[AutoHeal] uncheck healed via [${strategy}] → ${name}`);
-        await healed.uncheck({ timeout: Global_Timeout.action });
+        await healed.first().uncheck({ timeout: Global_Timeout.action });
         logger.pass(`Unchecked → ${name}`);
         return this;
       } catch (error: any) {
@@ -391,13 +366,13 @@ export class BasePage {
 
   async hover(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    logger.debug(`Hover → ${name}`);
+    logger.step(`Hover → ${name}`);
     return ErrorHandler.handle<this>(async () => {
       try {
         const { locator: healed, healed: wasHealed, strategy } =
-          await autoHeal(this.getLocator(selector), Global_Timeout.action);
+          await autoHeal(this.getLocator(selector), undefined, Global_Timeout.action);
         if (wasHealed) logger.warn(`[AutoHeal] hover healed via [${strategy}] → ${name}`);
-        await healed.hover({ timeout: Global_Timeout.action });
+        await healed.first().hover({ timeout: Global_Timeout.action });
         logger.pass(`Hovered → ${name}`);
         return this;
       } catch (error: any) {
@@ -409,13 +384,13 @@ export class BasePage {
 
   async focus(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    logger.debug(`Focus → ${name}`);
+    logger.step(`Focus → ${name}`);
     return ErrorHandler.handle<this>(async () => {
       try {
         const { locator: healed, healed: wasHealed, strategy } =
-          await autoHeal(this.getLocator(selector), Global_Timeout.action);
+          await autoHeal(this.getLocator(selector), undefined, Global_Timeout.action);
         if (wasHealed) logger.warn(`[AutoHeal] focus healed via [${strategy}] → ${name}`);
-        await healed.focus({ timeout: Global_Timeout.action });
+        await healed.first().focus({ timeout: Global_Timeout.action });
         logger.pass(`Focused → ${name}`);
         return this;
       } catch (error: any) {
@@ -427,14 +402,14 @@ export class BasePage {
 
   async press(selector: string | Locator, key: string): Promise<this> {
     const name = this.getElementName(selector);
-    logger.debug(`Press → ${name} | Key: "${key}"`);
+    logger.step(`Press → ${name} | "${key}"`);
     return ErrorHandler.handle<this>(async () => {
       try {
         const { locator: healed, healed: wasHealed, strategy } =
-          await autoHeal(this.getLocator(selector), Global_Timeout.action);
+          await autoHeal(this.getLocator(selector), undefined, Global_Timeout.action);
         if (wasHealed) logger.warn(`[AutoHeal] press healed via [${strategy}] → ${name}`);
-        await healed.press(key, { timeout: Global_Timeout.action });
-        logger.pass(`Pressed "${key}" on → ${name}`);
+        await healed.first().press(key, { timeout: Global_Timeout.action });
+        logger.pass(`Pressed "${key}" → ${name}`);
         return this;
       } catch (error: any) {
         logger.error(`press failed → ${name} → ${error.message}`);
@@ -444,11 +419,11 @@ export class BasePage {
   }
 
   // ==========================================================================
-  //  KEYBOARD & MOUSE (GLOBAL)
+  //  KEYBOARD & MOUSE
   // ==========================================================================
 
   async pressKey(key: string): Promise<this> {
-    logger.debug(`Press key → "${key}"`);
+    logger.step(`Press key → "${key}"`);
     return ErrorHandler.handle<this>(async () => {
       try {
         await this.page.keyboard.press(key);
@@ -462,11 +437,11 @@ export class BasePage {
   }
 
   async typeText(text: string): Promise<this> {
-    logger.debug(`Type text globally → "${text}"`);
+    logger.step(`Type text → "${text}"`);
     return ErrorHandler.handle<this>(async () => {
       try {
         await this.page.keyboard.type(text);
-        logger.pass(`Typed globally → "${text}"`);
+        logger.pass(`Typed → "${text}"`);
         return this;
       } catch (error: any) {
         logger.error(`typeText failed → ${error.message}`);
@@ -475,8 +450,8 @@ export class BasePage {
     }, { context: "BasePage.typeText" });
   }
 
-  async mouseClick(x: number, y: number, button: "left" | "right" | "middle" = "left", clickCount: number = 1): Promise<this> {
-    logger.debug(`Mouse click → x=${x}, y=${y} | button=${button} | clicks=${clickCount}`);
+  async mouseClick(x: number, y: number, button: "left" | "right" | "middle" = "left", clickCount = 1): Promise<this> {
+    logger.step(`Mouse click → x=${x}, y=${y}`);
     return ErrorHandler.handle<this>(async () => {
       try {
         await this.page.mouse.click(x, y, { button, clickCount });
@@ -494,7 +469,6 @@ export class BasePage {
     return ErrorHandler.handle<this>(async () => {
       try {
         await this.page.mouse.move(x, y);
-        logger.pass(`Mouse moved → x=${x}, y=${y}`);
         return this;
       } catch (error: any) {
         logger.error(`mouseMove failed → ${error.message}`);
@@ -506,11 +480,11 @@ export class BasePage {
   async dragAndDrop(source: string | Locator, target: string | Locator): Promise<this> {
     const sourceName = this.getElementName(source);
     const targetName = this.getElementName(target);
-    logger.debug(`Drag → ${sourceName} to ${targetName}`);
+    logger.step(`Drag → ${sourceName} to ${targetName}`);
     return ErrorHandler.handle<this>(async () => {
       try {
         await this.getLocator(source).dragTo(this.getLocator(target));
-        logger.pass(`Dragged ${sourceName} → ${targetName}`);
+        logger.pass(`Dragged → ${sourceName} to ${targetName}`);
         return this;
       } catch (error: any) {
         logger.error(`dragAndDrop failed → ${sourceName} → ${targetName} → ${error.message}`);
@@ -520,12 +494,12 @@ export class BasePage {
   }
 
   // ==========================================================================
-  //  NEW TAB / WINDOW HANDLING
+  //  NEW TAB / WINDOW
   // ==========================================================================
 
   async clickAndGetNewTab(selector: string | Locator): Promise<Page> {
     const name = this.getElementName(selector);
-    logger.step(`Click and get new tab → ${name}`);
+    logger.step(`Click → new tab via ${name}`);
     return ErrorHandler.handle<Page>(async () => {
       try {
         const [newPage] = await Promise.all([
@@ -533,7 +507,7 @@ export class BasePage {
           this.getLocator(selector).click(),
         ]);
         await newPage.waitForLoadState("domcontentloaded");
-        logger.pass(`New tab opened → ${newPage.url()}`);
+        logger.pass(`New tab → ${newPage.url()}`);
         return newPage;
       } catch (error: any) {
         logger.error(`clickAndGetNewTab failed → ${name} → ${error.message}`);
@@ -543,14 +517,14 @@ export class BasePage {
   }
 
   async switchToTab(index: number): Promise<Page> {
-    logger.step(`Switch to tab → [${index}]`);
+    logger.step(`Switch to tab [${index}]`);
     return ErrorHandler.handle<Page>(async () => {
       try {
         const pages = this.page.context().pages();
-        if (index >= pages.length) throw new Error(`Tab index [${index}] out of range. Found ${pages.length} tab(s).`);
+        if (index >= pages.length) throw new Error(`Tab [${index}] out of range. Found ${pages.length}.`);
         const tab = pages[index];
         await tab.bringToFront();
-        logger.pass(`Switched to tab [${index}] → ${tab.url()}`);
+        logger.pass(`Tab [${index}] → ${tab.url()}`);
         return tab;
       } catch (error: any) {
         logger.error(`switchToTab failed → [${index}] → ${error.message}`);
@@ -559,24 +533,20 @@ export class BasePage {
     }, { context: `BasePage.switchToTab (${index})` });
   }
 
-  getTabCount(): number {
-    const count = this.page.context().pages().length;
-    logger.debug(`Tab count → ${count}`);
-    return count;
-  }
+  getTabCount(): number { return this.page.context().pages().length; }
 
   // ==========================================================================
-  //  WAIT METHODS — all with auto-heal
+  //  WAIT METHODS
   // ==========================================================================
 
   async waitForElementIsVisible(selector: string | Locator, timeout?: number): Promise<this> {
     const name     = this.getElementName(selector);
     const waitTime = timeout || Global_Timeout.wait;
-    logger.debug(`Wait visible → ${name} (${waitTime}ms)`);
+    logger.step(`Wait visible → ${name}`);
     return ErrorHandler.handle<this>(async () => {
       try {
         const { locator: healed, healed: wasHealed, strategy } =
-          await autoHeal(this.getLocator(selector), Math.min(10000, waitTime));
+          await autoHeal(this.getLocator(selector), undefined, Math.min(10000, waitTime));
         if (wasHealed) logger.warn(`[AutoHeal] waitForElementIsVisible healed via [${strategy}] → ${name}`);
         await WaitUtils.waitForElementIsVisible(healed, waitTime);
         logger.pass(`Visible → ${name}`);
@@ -591,11 +561,11 @@ export class BasePage {
   async waitForElementToDisappear(selector: string | Locator, timeout?: number): Promise<this> {
     const name     = this.getElementName(selector);
     const waitTime = timeout || Global_Timeout.wait;
-    logger.debug(`Wait disappear → ${name} (${waitTime}ms)`);
+    logger.step(`Wait disappear → ${name}`);
     return ErrorHandler.handle<this>(async () => {
       try {
         const { locator: healed, healed: wasHealed, strategy } =
-          await autoHeal(this.getLocator(selector), Math.min(10000, waitTime));
+          await autoHeal(this.getLocator(selector), undefined, Math.min(10000, waitTime));
         if (wasHealed) logger.warn(`[AutoHeal] waitForElementToDisappear healed via [${strategy}] → ${name}`);
         await WaitUtils.waitForElementToDisappear(healed, waitTime);
         logger.pass(`Disappeared → ${name}`);
@@ -609,13 +579,13 @@ export class BasePage {
 
   async waitForElementEnabled(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
-    logger.debug(`Wait enabled → ${name}`);
+    logger.step(`Wait enabled → ${name}`);
     return ErrorHandler.handle<this>(async () => {
       try {
         const { locator: healed, healed: wasHealed, strategy } =
-          await autoHeal(this.getLocator(selector), 3000);
+          await autoHeal(this.getLocator(selector), undefined, 3000);
         if (wasHealed) logger.warn(`[AutoHeal] waitForElementEnabled healed via [${strategy}] → ${name}`);
-        await expect(healed).toBeEnabled({ timeout: Global_Timeout.wait });
+        await expect(healed.first()).toBeEnabled({ timeout: Global_Timeout.wait });
         logger.pass(`Enabled → ${name}`);
         return this;
       } catch (error: any) {
@@ -626,7 +596,7 @@ export class BasePage {
   }
 
   async waitForURL(url: string | RegExp): Promise<this> {
-    logger.debug(`Wait URL → ${url}`);
+    logger.step(`Wait URL → ${url}`);
     return ErrorHandler.handle<this>(async () => {
       try {
         await this.page.waitForURL(url, { timeout: Global_Timeout.navigation });
@@ -644,7 +614,7 @@ export class BasePage {
     return ErrorHandler.handle<this>(async () => {
       try {
         await this.page.waitForLoadState(state, { timeout: Global_Timeout.navigation });
-        logger.pass(`LoadState reached → ${state}`);
+        logger.debug(`LoadState reached → ${state}`);
         return this;
       } catch (error: any) {
         logger.error(`waitForLoadState failed → ${state} → ${error.message}`);
@@ -655,11 +625,11 @@ export class BasePage {
 
   async waitForTextOnPage(text: string | RegExp, timeout?: number): Promise<this> {
     const waitTime = timeout || Global_Timeout.wait;
-    logger.debug(`Wait text → "${text}" (${waitTime}ms)`);
+    logger.step(`Wait text → "${text}"`);
     return ErrorHandler.handle<this>(async () => {
       try {
         await expect(this.page.getByText(text)).toBeVisible({ timeout: waitTime });
-        logger.pass(`Text appeared → "${text}"`);
+        logger.pass(`Text visible → "${text}"`);
         return this;
       } catch (error: any) {
         logger.error(`waitForTextOnPage failed → "${text}" → ${error.message}`);
@@ -670,11 +640,11 @@ export class BasePage {
 
   async waitForTextDisappear(text: string | RegExp, timeout?: number): Promise<this> {
     const waitTime = timeout || Global_Timeout.wait;
-    logger.debug(`Wait text disappear → "${text}" (${waitTime}ms)`);
+    logger.step(`Wait text gone → "${text}"`);
     return ErrorHandler.handle<this>(async () => {
       try {
         await expect(this.page.getByText(text)).not.toBeVisible({ timeout: waitTime });
-        logger.pass(`Text disappeared → "${text}"`);
+        logger.pass(`Text gone → "${text}"`);
         return this;
       } catch (error: any) {
         logger.error(`waitForTextDisappear failed → "${text}" → ${error.message}`);
@@ -691,8 +661,8 @@ export class BasePage {
     const name = this.getElementName(selector);
     return ErrorHandler.handle<this>(async () => {
       try {
-        await expect(this.getLocator(selector)).toBeVisible({ timeout: Global_Timeout.wait });
-        logger.pass(`Visible → ${name}`);
+        await expect(this.getLocator(selector).first()).toBeVisible({ timeout: Global_Timeout.wait });
+        logger.pass(`Assert visible → ${name}`);
         return this;
       } catch (error: any) {
         throw new Error(`assertElementVisible failed → ${name} → ${error.message}`);
@@ -704,8 +674,8 @@ export class BasePage {
     const name = this.getElementName(selector);
     return ErrorHandler.handle<this>(async () => {
       try {
-        await expect(this.getLocator(selector)).toBeHidden({ timeout: Global_Timeout.wait });
-        logger.pass(`Hidden → ${name}`);
+        await expect(this.getLocator(selector).first()).toBeHidden({ timeout: Global_Timeout.wait });
+        logger.pass(`Assert hidden → ${name}`);
         return this;
       } catch (error: any) {
         throw new Error(`assertElementHidden failed → ${name} → ${error.message}`);
@@ -717,8 +687,8 @@ export class BasePage {
     const name = this.getElementName(selector);
     return ErrorHandler.handle<this>(async () => {
       try {
-        await expect(this.getLocator(selector)).toBeEnabled({ timeout: Global_Timeout.wait });
-        logger.pass(`Enabled → ${name}`);
+        await expect(this.getLocator(selector).first()).toBeEnabled({ timeout: Global_Timeout.wait });
+        logger.pass(`Assert enabled → ${name}`);
         return this;
       } catch (error: any) {
         throw new Error(`assertElementEnabled failed → ${name} → ${error.message}`);
@@ -730,8 +700,8 @@ export class BasePage {
     const name = this.getElementName(selector);
     return ErrorHandler.handle<this>(async () => {
       try {
-        await expect(this.getLocator(selector)).toBeDisabled({ timeout: Global_Timeout.wait });
-        logger.pass(`Disabled → ${name}`);
+        await expect(this.getLocator(selector).first()).toBeDisabled({ timeout: Global_Timeout.wait });
+        logger.pass(`Assert disabled → ${name}`);
         return this;
       } catch (error: any) {
         throw new Error(`assertElementDisabled failed → ${name} → ${error.message}`);
@@ -743,8 +713,8 @@ export class BasePage {
     const name = this.getElementName(selector);
     return ErrorHandler.handle<this>(async () => {
       try {
-        await expect(this.getLocator(selector)).toHaveText(text, { timeout: Global_Timeout.wait });
-        logger.pass(`Text matched → ${name}`);
+        await expect(this.getLocator(selector).first()).toHaveText(text, { timeout: Global_Timeout.wait });
+        logger.pass(`Assert text → ${name}`);
         return this;
       } catch (error: any) {
         throw new Error(`assertText failed → ${name} → ${error.message}`);
@@ -756,8 +726,8 @@ export class BasePage {
     const name = this.getElementName(selector);
     return ErrorHandler.handle<this>(async () => {
       try {
-        await expect(this.getLocator(selector)).toContainText(text, { timeout: Global_Timeout.wait });
-        logger.pass(`Contains text → ${name}`);
+        await expect(this.getLocator(selector).first()).toContainText(text, { timeout: Global_Timeout.wait });
+        logger.pass(`Assert contains text → ${name}`);
         return this;
       } catch (error: any) {
         throw new Error(`assertContainsText failed → ${name} → ${error.message}`);
@@ -769,8 +739,8 @@ export class BasePage {
     const name = this.getElementName(selector);
     return ErrorHandler.handle<this>(async () => {
       try {
-        await expect(this.getLocator(selector)).toHaveValue(value, { timeout: Global_Timeout.wait });
-        logger.pass(`Value matched → ${name}`);
+        await expect(this.getLocator(selector).first()).toHaveValue(value, { timeout: Global_Timeout.wait });
+        logger.pass(`Assert value → ${name}`);
         return this;
       } catch (error: any) {
         throw new Error(`assertValue failed → ${name} → ${error.message}`);
@@ -782,8 +752,8 @@ export class BasePage {
     const name = this.getElementName(selector);
     return ErrorHandler.handle<this>(async () => {
       try {
-        await expect(this.getLocator(selector)).toHaveAttribute(attribute, value, { timeout: Global_Timeout.wait });
-        logger.pass(`Attribute matched → ${name}[${attribute}]`);
+        await expect(this.getLocator(selector).first()).toHaveAttribute(attribute, value, { timeout: Global_Timeout.wait });
+        logger.pass(`Assert attr → ${name}[${attribute}]`);
         return this;
       } catch (error: any) {
         throw new Error(`assertAttributeValue failed → ${name}[${attribute}] → ${error.message}`);
@@ -795,8 +765,8 @@ export class BasePage {
     const name = this.getElementName(selector);
     return ErrorHandler.handle<this>(async () => {
       try {
-        await expect(this.getLocator(selector)).toBeChecked({ timeout: Global_Timeout.wait });
-        logger.pass(`Checked → ${name}`);
+        await expect(this.getLocator(selector).first()).toBeChecked({ timeout: Global_Timeout.wait });
+        logger.pass(`Assert checked → ${name}`);
         return this;
       } catch (error: any) {
         throw new Error(`assertChecked failed → ${name} → ${error.message}`);
@@ -808,8 +778,8 @@ export class BasePage {
     const name = this.getElementName(selector);
     return ErrorHandler.handle<this>(async () => {
       try {
-        await expect(this.getLocator(selector)).not.toBeChecked({ timeout: Global_Timeout.wait });
-        logger.pass(`Not checked → ${name}`);
+        await expect(this.getLocator(selector).first()).not.toBeChecked({ timeout: Global_Timeout.wait });
+        logger.pass(`Assert not checked → ${name}`);
         return this;
       } catch (error: any) {
         throw new Error(`assertNotChecked failed → ${name} → ${error.message}`);
@@ -821,7 +791,7 @@ export class BasePage {
     return ErrorHandler.handle<this>(async () => {
       try {
         await expect(this.page).toHaveURL(url, { timeout: Global_Timeout.wait });
-        logger.pass("URL matched");
+        logger.pass(`Assert URL → ${url}`);
         return this;
       } catch (error: any) {
         logger.error(`assertURL failed → expected: ${url} | actual: ${this.page.url()}`);
@@ -834,7 +804,7 @@ export class BasePage {
     return ErrorHandler.handle<this>(async () => {
       try {
         await expect(this.page).toHaveTitle(title, { timeout: Global_Timeout.wait });
-        logger.pass("Title matched");
+        logger.pass(`Assert title → ${title}`);
         return this;
       } catch (error: any) {
         const actual = await this.page.title();
@@ -849,7 +819,7 @@ export class BasePage {
     return ErrorHandler.handle<this>(async () => {
       try {
         await expect(this.getLocator(selector)).toHaveCount(count, { timeout: Global_Timeout.wait });
-        logger.pass(`Count matched → ${name} = ${count}`);
+        logger.pass(`Assert count → ${name} = ${count}`);
         return this;
       } catch (error: any) {
         const actual = await this.getLocator(selector).count();
@@ -864,27 +834,18 @@ export class BasePage {
   // ==========================================================================
 
   async isVisible(selector: string | Locator): Promise<boolean> {
-    const name = this.getElementName(selector);
-    return ErrorHandler.handle<boolean>(async () => {
-      try { return await this.getLocator(selector).isVisible(); }
-      catch (error: any) { throw new Error(`isVisible failed → ${name} → ${error.message}`); }
-    }, { context: `BasePage.isVisible (${name})` });
+    try { return await this.getLocator(selector).first().isVisible(); }
+    catch { return false; }
   }
 
   async isEnabled(selector: string | Locator): Promise<boolean> {
-    const name = this.getElementName(selector);
-    return ErrorHandler.handle<boolean>(async () => {
-      try { return await this.getLocator(selector).isEnabled(); }
-      catch (error: any) { throw new Error(`isEnabled failed → ${name} → ${error.message}`); }
-    }, { context: `BasePage.isEnabled (${name})` });
+    try { return await this.getLocator(selector).first().isEnabled(); }
+    catch { return false; }
   }
 
   async isChecked(selector: string | Locator): Promise<boolean> {
-    const name = this.getElementName(selector);
-    return ErrorHandler.handle<boolean>(async () => {
-      try { return await this.getLocator(selector).isChecked(); }
-      catch (error: any) { throw new Error(`isChecked failed → ${name} → ${error.message}`); }
-    }, { context: `BasePage.isChecked (${name})` });
+    try { return await this.getLocator(selector).first().isChecked(); }
+    catch { return false; }
   }
 
   async getText(selector: string | Locator): Promise<string> {
@@ -892,10 +853,10 @@ export class BasePage {
     return ErrorHandler.handle<string>(async () => {
       try {
         const { locator: healed, healed: wasHealed, strategy } =
-          await autoHeal(this.getLocator(selector), 3000);
+          await autoHeal(this.getLocator(selector), undefined, 3000);
         if (wasHealed) logger.warn(`[AutoHeal] getText healed via [${strategy}] → ${name}`);
-        await healed.waitFor({ state: "visible", timeout: Global_Timeout.wait });
-        return (await healed.textContent())?.trim() || "";
+        await healed.first().waitFor({ state: "visible", timeout: Global_Timeout.wait });
+        return (await healed.first().textContent())?.trim() || "";
       } catch (error: any) {
         throw new Error(`getText failed → ${name} → ${error.message}`);
       }
@@ -907,9 +868,9 @@ export class BasePage {
     return ErrorHandler.handle<string>(async () => {
       try {
         const { locator: healed, healed: wasHealed, strategy } =
-          await autoHeal(this.getLocator(selector), 3000);
+          await autoHeal(this.getLocator(selector), undefined, 3000);
         if (wasHealed) logger.warn(`[AutoHeal] getInputValue healed via [${strategy}] → ${name}`);
-        return await healed.inputValue();
+        return await healed.first().inputValue();
       } catch (error: any) {
         throw new Error(`getInputValue failed → ${name} → ${error.message}`);
       }
@@ -919,7 +880,7 @@ export class BasePage {
   async getAttribute(selector: string | Locator, attribute: string): Promise<string | null> {
     const name = this.getElementName(selector);
     return ErrorHandler.handle<string | null>(async () => {
-      try { return await this.getLocator(selector).getAttribute(attribute); }
+      try { return await this.getLocator(selector).first().getAttribute(attribute); }
       catch (error: any) { throw new Error(`getAttribute failed → ${name}[${attribute}] → ${error.message}`); }
     }, { context: `BasePage.getAttribute (${name})` });
   }
@@ -937,18 +898,16 @@ export class BasePage {
   // ==========================================================================
 
   acceptDialog(promptText?: string): this {
-    logger.debug("Dialog handler registered → Accept");
-    this.page.once("dialog", (dialog) => {
-      logger.pass(`Dialog accepted: ${dialog.message()}`);
+    this.page.once("dialog", dialog => {
+      logger.debug(`Dialog accepted → "${dialog.message()}"`);
       dialog.accept(promptText);
     });
     return this;
   }
 
   dismissDialog(): this {
-    logger.debug("Dialog handler registered → Dismiss");
-    this.page.once("dialog", (dialog) => {
-      logger.pass(`Dialog dismissed: ${dialog.message()}`);
+    this.page.once("dialog", dialog => {
+      logger.debug(`Dialog dismissed → "${dialog.message()}"`);
       dialog.dismiss();
     });
     return this;
@@ -960,11 +919,12 @@ export class BasePage {
 
   async switchToFrame(selector: string | Locator): Promise<FrameLocator> {
     const name = this.getElementName(selector);
+    logger.step(`Switch frame → ${name}`);
     return ErrorHandler.handle<FrameLocator>(async () => {
       try {
         const frameLocator = this.getLocator(selector).contentFrame();
         this._currentFrame = frameLocator;
-        logger.pass(`Switched to frame → ${name}`);
+        logger.pass(`Frame → ${name}`);
         return frameLocator;
       } catch (error: any) {
         throw new Error(`switchToFrame failed → ${name} → ${error.message}`);
@@ -973,14 +933,14 @@ export class BasePage {
   }
 
   async switchToFrameByIndex(index: number): Promise<FrameLocator> {
+    logger.step(`Switch frame [${index}]`);
     return ErrorHandler.handle<FrameLocator>(async () => {
       try {
         const frames = this.page.frames();
-        const actualIndex = index + 1;
-        if (actualIndex >= frames.length) throw new Error(`Frame index [${index}] out of range.`);
-        const frameLocator = this.page.frameLocator(`iframe:nth-of-type(${actualIndex})`);
+        if (index + 1 >= frames.length) throw new Error(`Frame [${index}] out of range.`);
+        const frameLocator = this.page.frameLocator(`iframe:nth-of-type(${index + 1})`);
         this._currentFrame = frameLocator;
-        logger.pass(`Switched to frame [${index}]`);
+        logger.pass(`Frame [${index}]`);
         return frameLocator;
       } catch (error: any) {
         throw new Error(`switchToFrameByIndex failed → [${index}] → ${error.message}`);
@@ -989,11 +949,12 @@ export class BasePage {
   }
 
   async switchToFrameByName(name: string): Promise<FrameLocator> {
+    logger.step(`Switch frame → "${name}"`);
     return ErrorHandler.handle<FrameLocator>(async () => {
       try {
         const frameLocator = this.page.frameLocator(`iframe[name="${name}"]`);
         this._currentFrame = frameLocator;
-        logger.pass(`Switched to frame by name → "${name}"`);
+        logger.pass(`Frame → "${name}"`);
         return frameLocator;
       } catch (error: any) {
         throw new Error(`switchToFrameByName failed → "${name}" → ${error.message}`);
@@ -1002,11 +963,12 @@ export class BasePage {
   }
 
   async switchToFrameById(id: string): Promise<FrameLocator> {
+    logger.step(`Switch frame → #${id}`);
     return ErrorHandler.handle<FrameLocator>(async () => {
       try {
         const frameLocator = this.page.frameLocator(`iframe#${id}`);
         this._currentFrame = frameLocator;
-        logger.pass(`Switched to frame by id → "${id}"`);
+        logger.pass(`Frame → #${id}`);
         return frameLocator;
       } catch (error: any) {
         throw new Error(`switchToFrameById failed → "${id}" → ${error.message}`);
@@ -1016,15 +978,12 @@ export class BasePage {
 
   async switchToMainFrame(): Promise<this> {
     this._currentFrame = null;
-    logger.pass("Back to main frame");
+    logger.debug("Main frame restored");
     return this;
   }
 
   getCurrentFrame(): FrameLocator | null { return this._currentFrame; }
-
-  getFrameCount(): number {
-    return this.page.frames().length - 1;
-  }
+  getFrameCount(): number { return this.page.frames().length - 1; }
 
   // ==========================================================================
   //  FILE UPLOAD
@@ -1033,10 +992,11 @@ export class BasePage {
   async uploadFile(selector: string | Locator, filePaths: string | string[]): Promise<this> {
     const name  = this.getElementName(selector);
     const files = Array.isArray(filePaths) ? filePaths : [filePaths];
+    logger.step(`Upload → ${name}`);
     return ErrorHandler.handle<this>(async () => {
       try {
         await this.getLocator(selector).setInputFiles(files);
-        logger.pass(`File(s) uploaded → ${name}`);
+        logger.pass(`Uploaded → ${name}`);
         return this;
       } catch (error: any) {
         throw new Error(`uploadFile failed → ${name} → ${error.message}`);
@@ -1049,7 +1009,7 @@ export class BasePage {
     return ErrorHandler.handle<this>(async () => {
       try {
         await this.getLocator(selector).setInputFiles([]);
-        logger.pass(`File upload cleared → ${name}`);
+        logger.pass(`File cleared → ${name}`);
         return this;
       } catch (error: any) {
         throw new Error(`clearFileUpload failed → ${name} → ${error.message}`);
@@ -1063,9 +1023,7 @@ export class BasePage {
 
   async getCookie(name: string): Promise<string | undefined> {
     const cookies = await this.page.context().cookies();
-    const cookie  = cookies.find(c => c.name === name);
-    logger.pass(`Cookie "${name}" → ${cookie?.value ?? "not found"}`);
-    return cookie?.value;
+    return cookies.find(c => c.name === name)?.value;
   }
 
   async clearCookies(): Promise<this> {
@@ -1075,7 +1033,7 @@ export class BasePage {
   }
 
   async getLocalStorageItem(key: string): Promise<string | null> {
-    return this.page.evaluate((k) => window.localStorage.getItem(k), key);
+    return this.page.evaluate(k => window.localStorage.getItem(k), key);
   }
 
   async setLocalStorageItem(key: string, value: string): Promise<this> {
@@ -1092,8 +1050,8 @@ export class BasePage {
   //  NETWORK INTERCEPTION
   // ==========================================================================
 
-  async mockAPIResponse(urlPattern: string, responseBody: object, status: number = 200): Promise<this> {
-    await this.page.route(urlPattern, async (route) => {
+  async mockAPIResponse(urlPattern: string, responseBody: object, status = 200): Promise<this> {
+    await this.page.route(urlPattern, async route => {
       await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(responseBody) });
     });
     logger.pass(`API mocked → ${urlPattern}`);
@@ -1101,7 +1059,7 @@ export class BasePage {
   }
 
   async blockRequest(urlPattern: string): Promise<this> {
-    await this.page.route(urlPattern, (route) => route.abort());
+    await this.page.route(urlPattern, route => route.abort());
     logger.pass(`Request blocked → ${urlPattern}`);
     return this;
   }
@@ -1130,7 +1088,7 @@ export class BasePage {
     return ErrorHandler.handle<string>(async () => {
       try {
         const text = await this.page.evaluate(() => navigator.clipboard.readText());
-        logger.pass(`Clipboard text → "${text}"`);
+        logger.pass(`Clipboard → "${text}"`);
         return text;
       } catch (error: any) {
         throw new Error(`getClipboardText failed → ${error.message}`);
@@ -1139,18 +1097,19 @@ export class BasePage {
   }
 
   // ==========================================================================
-  //  SCROLL METHODS
+  //  SCROLL
   // ==========================================================================
 
   async scrollToElement(selector: string | Locator): Promise<this> {
     const name = this.getElementName(selector);
+    logger.step(`Scroll to → ${name}`);
     return ErrorHandler.handle<this>(async () => {
       try {
         const { locator: healed, healed: wasHealed, strategy } =
-          await autoHeal(this.getLocator(selector), 3000);
+          await autoHeal(this.getLocator(selector), undefined, 3000);
         if (wasHealed) logger.warn(`[AutoHeal] scrollToElement healed via [${strategy}] → ${name}`);
-        await healed.scrollIntoViewIfNeeded({ timeout: 5000 });
-        logger.pass(`Scrolled to → ${name}`);
+        await healed.first().scrollIntoViewIfNeeded({ timeout: 5000 });
+        logger.pass(`Scrolled → ${name}`);
         return this;
       } catch (error: any) {
         throw new Error(`scrollToElement failed → ${name} → ${error.message}`);
@@ -1159,73 +1118,59 @@ export class BasePage {
   }
 
   async scrollToTop(): Promise<this> {
-    return ErrorHandler.handle<this>(async () => {
-      await this.page.evaluate(() => window.scrollTo(0, 0));
-      logger.pass("Scrolled to top");
-      return this;
-    }, { context: "BasePage.scrollToTop" });
+    logger.step("Scroll to top");
+    await this.page.evaluate(() => window.scrollTo(0, 0));
+    logger.pass("Scrolled to top");
+    return this;
   }
 
   async scrollToBottom(): Promise<this> {
-    return ErrorHandler.handle<this>(async () => {
-      await this.page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-      logger.pass("Scrolled to bottom");
-      return this;
-    }, { context: "BasePage.scrollToBottom" });
+    logger.step("Scroll to bottom");
+    await this.page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    logger.pass("Scrolled to bottom");
+    return this;
   }
 
   async scrollBy(x: number, y: number): Promise<this> {
-    return ErrorHandler.handle<this>(async () => {
-      await this.page.evaluate(
-        ({ scrollX, scrollY }) => window.scrollBy(scrollX, scrollY),
-        { scrollX: x, scrollY: y }
-      );
-      logger.pass(`Scrolled by x=${x}, y=${y}`);
-      return this;
-    }, { context: "BasePage.scrollBy" });
+    await this.page.evaluate(({ sx, sy }) => window.scrollBy(sx, sy), { sx: x, sy: y });
+    return this;
   }
 
   // ==========================================================================
-  //  SCREENSHOT METHODS
+  //  SCREENSHOT
   // ==========================================================================
 
   async takeScreenshot(name = "screenshot"): Promise<void> {
     const fileName = `${name}_${Date.now()}.png`;
-    return ErrorHandler.handle<void>(async () => {
-      try {
-        await this.page.screenshot({ path: `test-results/screenshots/${fileName}`, fullPage: true });
-        logger.pass(`Screenshot saved → ${fileName}`);
-      } catch (error: any) {
-        throw new Error(`takeScreenshot failed → ${fileName} → ${error.message}`);
-      }
-    }, { context: `BasePage.takeScreenshot (${fileName})` });
+    try {
+      await this.page.screenshot({ path: `test-results/screenshots/${fileName}`, fullPage: true });
+      logger.pass(`Screenshot → ${fileName}`);
+    } catch (error: any) {
+      throw new Error(`takeScreenshot failed → ${fileName} → ${error.message}`);
+    }
   }
 
   async takeElementScreenshot(selector: string | Locator, name = "element"): Promise<void> {
     const elemName = this.getElementName(selector);
     const fileName = `${name}_${Date.now()}.png`;
-    return ErrorHandler.handle<void>(async () => {
-      try {
-        await this.getLocator(selector).screenshot({ path: `test-results/screenshots/${fileName}` });
-        logger.pass(`Element screenshot saved → ${fileName}`);
-      } catch (error: any) {
-        throw new Error(`takeElementScreenshot failed → ${elemName} → ${error.message}`);
-      }
-    }, { context: `BasePage.takeElementScreenshot (${elemName})` });
+    try {
+      await this.getLocator(selector).screenshot({ path: `test-results/screenshots/${fileName}` });
+      logger.pass(`Element screenshot → ${fileName}`);
+    } catch (error: any) {
+      throw new Error(`takeElementScreenshot failed → ${elemName} → ${error.message}`);
+    }
   }
 
   // ==========================================================================
-  //  MISC UTILITIES
+  //  MISC
   // ==========================================================================
 
-  getCurrentURL(): string { return this.page.url(); }
-
+  getCurrentURL(): string  { return this.page.url(); }
   async getTitle(): Promise<string> { return this.page.title(); }
-
   getPage(): Page { return this.page; }
 
   async pause(milliseconds = 1000): Promise<this> {
-    logger.warn(`pause → ${milliseconds}ms (avoid in production tests)`);
+    logger.warn(`pause → ${milliseconds}ms`);
     await this.page.waitForTimeout(milliseconds);
     return this;
   }
@@ -1237,11 +1182,11 @@ export class BasePage {
   async storeTextContent(selector: Locator | string, key: string): Promise<void> {
     return ErrorHandler.handle<void>(async () => {
       try {
-        const loc = this.getLocator(selector);
-        await loc.waitFor({ state: "visible", timeout: Global_Timeout.wait });
-        const value = (await loc.textContent())?.trim() || "";
+        const loc   = this.getLocator(selector);
+        await loc.first().waitFor({ state: "visible", timeout: Global_Timeout.wait });
+        const value = (await loc.first().textContent())?.trim() || "";
         Runtime.set(key, value);
-        logger.pass(`Stored text → ${key}: "${value}"`);
+        logger.pass(`Stored → ${key}: "${value}"`);
       } catch (error: any) {
         throw new Error(`storeTextContent failed → ${key} → ${error.message}`);
       }
@@ -1250,20 +1195,22 @@ export class BasePage {
 
   async storeInputValue(selector: Locator | string, key: string): Promise<void> {
     return ErrorHandler.handle<void>(async () => {
-      let value = "";
-      try { value = (await this.getLocator(selector).inputValue())?.trim() || ""; }
-      catch { value = ""; }
-      Runtime.set(key, value);
-      logger.pass(`Stored input → ${key}: "${value}"`);
+      try {
+        const value = (await this.getLocator(selector).first().inputValue())?.trim() || "";
+        Runtime.set(key, value);
+        logger.pass(`Stored → ${key}: "${value}"`);
+      } catch {
+        Runtime.set(key, "");
+      }
     }, { context: `BasePage.storeInputValue (${key})` });
   }
 
   async storeAttributeValue(selector: Locator | string, attribute: string, key: string): Promise<void> {
     return ErrorHandler.handle<void>(async () => {
       try {
-        const value = (await this.getLocator(selector).getAttribute(attribute))?.trim() || "";
+        const value = (await this.getLocator(selector).first().getAttribute(attribute))?.trim() || "";
         Runtime.set(key, value);
-        logger.pass(`Stored attribute → ${key} [${attribute}]: "${value}"`);
+        logger.pass(`Stored → ${key} [${attribute}]: "${value}"`);
       } catch (error: any) {
         throw new Error(`storeAttributeValue failed → ${key} → ${error.message}`);
       }

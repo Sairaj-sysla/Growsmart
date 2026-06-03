@@ -5,7 +5,7 @@ import { FileUtils } from "@utils/fileUtils";
 
 
 
-test("EasyMyTrip Hotel Booking Test", async ({ page }, testInfo) => {
+test("EasyMyTrip Hotel Booking Test  @smoke", async ({ page }, testInfo) => {
 
     const easyMyTripPage = new EasyMyTripPage(page);    
 

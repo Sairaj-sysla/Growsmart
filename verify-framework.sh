@@ -2,7 +2,7 @@
 # Framework Setup Verification Script
 
 echo "========================================="
-echo "MakeMyTrip Playwright Framework"
+echo " Playwright Framework"
 echo "========================================="
 echo ""
 
