@@ -35,19 +35,19 @@ export class EasyMyTripPage extends BasePage {
  Popularity: Locator;
  Price: Locator;
  Hotels: Locator; 
-    review: Locator;
-    price: Locator; 
-    hotelList: any ;
-        Check_in: Locator;
-    check_in_date: Locator;
-    check_Out: Locator;
-    check_out_date: Locator;
-    //cleanCheckIn: string = "";
-   // cleanCheckOut: string = "";
-   CityName: Locator;
-   FormatDate: Locator;
-   DateAfterDays: Locator;
-  cityName:Locator;
+ review: Locator;
+ price: Locator; 
+ hotelList: any ;
+ Check_in: Locator;
+ check_in_date: Locator;
+ check_Out: Locator;
+ check_out_date: Locator;
+ //cleanCheckIn: string = "";
+ // cleanCheckOut: string = "";
+ CityName: Locator;
+ FormatDate: Locator;
+ DateAfterDays: Locator;
+ cityName:Locator;
 
   constructor(page: Page) {
     super(page);
