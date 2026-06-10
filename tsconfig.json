@@ -1,9 +1,10 @@
 {
   "compilerOptions": {
     "target": "ES2020",
-    "module": "node16",
+    "module": "commonjs",
     "lib": ["ES2020", "DOM"],
-    "moduleResolution": "node16",
+    "moduleResolution": "node10",
+    "ignoreDeprecations": "6.0",
     "resolveJsonModule": true,
     "isolatedModules": false,
     "skipLibCheck": true,
@@ -22,14 +23,16 @@
     "declaration": true,
     "declarationMap": true,
 
+    "baseUrl": ".",
+    "typeRoots": ["./node_modules/@types"],
+    "types": ["node"],
+
     "paths": {
       "@pages/*":    ["./src/pages/*"],
       "@utils/*":    ["./src/utils/*"],
       "@fixtures/*": ["./src/fixtures/*"],
       "@tests/*":    ["./src/tests/*"]
-    },
-
-    "types": ["node"]
+    }
   },
 
   "include": [
