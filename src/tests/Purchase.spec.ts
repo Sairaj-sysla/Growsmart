@@ -1,4 +1,4 @@
-import { test } from "@playwright/test";
+import { test } from "../fixtures/baseFixture";
 import { LoginPage } from "../pages/growsSmartLogin";
 import { PurchaseOrderPage } from "../pages/purchaseOrderPage";
 
