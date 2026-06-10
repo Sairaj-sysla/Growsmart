@@ -129,7 +129,7 @@ export class ElementUtils {
 
       // Auto-heal: try primary, then Playwright smart healing if needed.
       const { locator: healed, healed: wasHealed, strategy } =
-        await autoHeal(locator, Math.min(timeout, 4000));
+        await autoHeal(locator, undefined, Math.min(timeout, 4000));
 
       if (wasHealed) {
         logger.warn(`[AutoHeal] click healed via [${strategy}] → ${label}`);
@@ -236,7 +236,7 @@ export class ElementUtils {
 
       // Auto-heal: try primary, then Playwright smart healing if needed.
       const { locator: healed, healed: wasHealed, strategy } =
-        await autoHeal(locator, Math.min(timeout, 4000));
+        await autoHeal(locator, undefined, Math.min(timeout, 4000));
 
       if (wasHealed) {
         logger.warn(`[AutoHeal] fill healed via [${strategy}] → ${label}`);
@@ -287,7 +287,7 @@ export class ElementUtils {
 
       // Auto-heal: try primary, then Playwright smart healing if needed.
       const { locator: healed, healed: wasHealed, strategy } =
-        await autoHeal(locator, Math.min(timeout, 4000));
+        await autoHeal(locator, undefined, Math.min(timeout, 4000));
 
       if (wasHealed) {
         logger.warn(`[AutoHeal] type healed via [${strategy}] → ${label}`);
