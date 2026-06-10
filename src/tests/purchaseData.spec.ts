@@ -1,4 +1,4 @@
-import { test }                                 from "@playwright/test";
+import { test } from "../fixtures/baseFixture";
 import { LoginPage }                            from "../pages/growsSmartLogin";
 import { PurchaseOrderPage, PurchaseOrderData } from "../pages/purchaseDataSet";
 import { loadTestData }                         from "../utils/dataFilter";
