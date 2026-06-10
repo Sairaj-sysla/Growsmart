@@ -3,40 +3,41 @@
     "target": "ES2020",
     "module": "commonjs",
     "lib": ["ES2020", "DOM"],
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
     "moduleResolution": "node",
+    "resolveJsonModule": true,
+    "isolatedModules": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowJs": false,
+    "ignoreDeprecations": "6.0",
+
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "noUnusedLocals":     false,
+    "noUnusedParameters": false,
+    "noImplicitReturns":  true,
+
     "outDir": "./dist",
-    "rootDir": "./src",
-    "baseUrl": "./",
-
-    "paths": {
-      "@pages/*": ["src/pages/*"],
-      "@utils/*": ["src/utils/*"],
-      "@fixtures/*": ["src/fixtures/*"],
-      "@tests/*": ["src/tests/*"]
-    },
-
+    "sourceMap": true,
     "declaration": true,
     "declarationMap": true,
-    "sourceMap": true,
 
-    "types": [
-      "node",
-      "@playwright/test",
-      "fs-extra"          // ✅ IMPORTANT FIX
-    ]
+    "baseUrl": ".",
+    "paths": {
+      "@pages/*":    ["./src/pages/*"],
+      "@utils/*":    ["./src/utils/*"],
+      "@fixtures/*": ["./src/fixtures/*"],
+      "@tests/*":    ["./src/tests/*"]
+    },
+
+    "types": ["node"]
   },
 
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "playwright.config.ts"
   ],
 
-  "exclude": [
-    "node_modules",
-    "dist"
-  ]
+  "exclude": ["node_modules", "dist"]
 }
