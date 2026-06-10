@@ -13,9 +13,14 @@ import { Runtime }        from "../utils/runtimeStore";
 import { logger }         from "../utils/logger";
 import { autoHeal }       from "../utils/autoHeal";
 
+// ✅ CompareOp declared OUTSIDE class — TypeScript requires this
+type CompareOp = "==" | "!=" | "contains" | "!contains" | ">" | ">=" | "<" | "<=";
+
 export class BasePage {
   protected page: Page;
   private _currentFrame: FrameLocator | null = null;
+  private _softErrors: string[] = [];
+  private _stepCounter = 0;
 
   constructor(page: Page) {
     this.page = page;
@@ -42,11 +47,9 @@ export class BasePage {
     if (explicitLabel) return explicitLabel;
     try {
       if (typeof selector !== "string") {
-        // Try to find property name on the page object
         for (const key of Object.getOwnPropertyNames(this)) {
           if ((this as any)[key] === selector) return key;
         }
-        // Try to extract from locator string
         try {
           const s          = selector.toString();
           const roleMatch  = s.match(/getByRole\((.*?)\)/);
@@ -69,7 +72,6 @@ export class BasePage {
   }
 
   private extractLabelFromSelector(selector: string): string {
-    // ── FIX: guard against undefined/null input ───────────────────────────
     if (!selector || typeof selector !== "string") return "element";
     try {
       const clean = selector.replace(/^css=/, "").replace(/^xpath=/, "").trim();
@@ -77,24 +79,20 @@ export class BasePage {
       if (clean.startsWith("#")) return clean.slice(1);
       if (clean.startsWith(".")) return clean.replace(/\./g, "-").replace(/^-/, "");
 
-      // Extract text content from XPath text() or normalize-space()
       const textMatch = clean.match(/text\(\)\s*=\s*["']([^"']+)["']/) ||
                         clean.match(/normalize-space\(\)\s*=\s*["']([^"']+)["']/) ||
                         clean.match(/contains\(text\(\),\s*["']([^"']+)["']\)/);
       if (textMatch?.[1]) return textMatch[1].trim().replace(/\s+/g, "_").substring(0, 30);
 
-      // Extract attribute value (id, name, placeholder, aria-label)
       const attrMatch = clean.match(/@id=["']([^"']+)["']/) ||
                         clean.match(/@name=["']([^"']+)["']/) ||
                         clean.match(/@placeholder=["']([^"']+)["']/) ||
                         clean.match(/@aria-label=["']([^"']+)["']/);
       if (attrMatch?.[1]) return attrMatch[1].trim().substring(0, 30);
 
-      // Extract data-testid
       const testIdMatch = clean.match(/data-testid=["']([^"']+)["']/);
       if (testIdMatch?.[1]) return testIdMatch[1];
 
-      // Fallback: clean up XPath/CSS to readable string
       if (clean.startsWith("//") || clean.includes("@")) {
         return clean
           .replace(/[^a-zA-Z0-9\s]+/g, "-")
@@ -106,6 +104,29 @@ export class BasePage {
       return clean.substring(0, 30) || "element";
     } catch {
       return "element";
+    }
+  }
+
+  // ==========================================================================
+  //  PRIVATE: compare() — shared by all if/while conditions
+  // ==========================================================================
+
+  private compare(actual: string, op: string, expected: string): boolean {
+    const a    = actual.trim();
+    const e    = expected.trim();
+    const aNum = parseFloat(a);
+    const eNum = parseFloat(e);
+
+    switch (op) {
+      case "==":        return a === e;
+      case "!=":        return a !== e;
+      case "contains":  return a.toLowerCase().includes(e.toLowerCase());
+      case "!contains": return !a.toLowerCase().includes(e.toLowerCase());
+      case ">":         return !isNaN(aNum) && !isNaN(eNum) && aNum > eNum;
+      case ">=":        return !isNaN(aNum) && !isNaN(eNum) && aNum >= eNum;
+      case "<":         return !isNaN(aNum) && !isNaN(eNum) && aNum < eNum;
+      case "<=":        return !isNaN(aNum) && !isNaN(eNum) && aNum <= eNum;
+      default:          return false;
     }
   }
 
@@ -185,6 +206,14 @@ export class BasePage {
         throw new Error(`goForward failed → ${error.message}`);
       }
     }, { context: "BasePage.goForward" });
+  }
+
+  // ==========================================================================
+  //  SCROLL HELPERS
+  // ==========================================================================
+
+  async scrollIntoView(selector: string | Locator): Promise<this> {
+    return this.scrollToElement(selector);
   }
 
   // ==========================================================================
@@ -653,6 +682,25 @@ export class BasePage {
     }, { context: `BasePage.waitForTextDisappear (${text})` });
   }
 
+  async waitForPageReady(timeout = 10000): Promise<this> {
+    logger.debug("Wait → page ready");
+    try {
+      await this.page.waitForLoadState("networkidle", { timeout });
+      for (const s of [
+        "//div[contains(@class,'loading')]",
+        "//div[contains(@class,'spinner')]",
+        "//div[contains(@class,'skeleton')]",
+        "//*[@data-loading='true']",
+      ]) {
+        await this.page.locator(`xpath=${s}`)
+          .waitFor({ state: "hidden", timeout: 3000 })
+          .catch(() => {});
+      }
+      logger.debug("Page ready ✅");
+    } catch { /* networkidle not always reachable */ }
+    return this;
+  }
+
   // ==========================================================================
   //  ASSERTIONS
   // ==========================================================================
@@ -829,6 +877,40 @@ export class BasePage {
     }, { context: `BasePage.assertElementCount (${name})` });
   }
 
+  // ── Soft Assertions ───────────────────────────────────────────────────────
+
+  async softAssertVisible(selector: string | Locator, label?: string): Promise<void> {
+    const name = label ?? this.getElementName(selector);
+    try {
+      await expect(this.getLocator(selector).first()).toBeVisible({ timeout: Global_Timeout.wait });
+      logger.pass(`[Soft] Visible → ${name}`);
+    } catch {
+      const msg = `[Soft FAIL] Not visible → ${name}`;
+      logger.warn(msg);
+      this._softErrors.push(msg);
+    }
+  }
+
+  async softAssertText(selector: string | Locator, expected: string, label?: string): Promise<void> {
+    const name = label ?? this.getElementName(selector);
+    try {
+      await expect(this.getLocator(selector).first()).toContainText(expected, { timeout: Global_Timeout.wait });
+      logger.pass(`[Soft] Text → ${name} contains "${expected}"`);
+    } catch {
+      const msg = `[Soft FAIL] Text mismatch → ${name} expected "${expected}"`;
+      logger.warn(msg);
+      this._softErrors.push(msg);
+    }
+  }
+
+  assertNoSoftErrors(): void {
+    if (this._softErrors.length > 0) {
+      const summary = this._softErrors.join("\n");
+      this._softErrors = [];
+      throw new Error(`Soft assertion failures:\n${summary}`);
+    }
+  }
+
   // ==========================================================================
   //  QUERY METHODS
   // ==========================================================================
@@ -891,6 +973,456 @@ export class BasePage {
       try { return await this.getLocator(selector).count(); }
       catch (error: any) { throw new Error(`getElementCount failed → ${name} → ${error.message}`); }
     }, { context: `BasePage.getElementCount (${name})` });
+  }
+
+  async getDisabledFieldValue(selector: string | Locator): Promise<string> {
+    const name = this.getElementName(selector);
+    logger.step(`Get disabled field value → ${name}`);
+    return ErrorHandler.handle<string>(async () => {
+      try {
+        const locator = this.getLocator(selector);
+        await locator.first().waitFor({ state: "attached", timeout: Global_Timeout.wait });
+        const raw = await locator.first().evaluate((el: any) => {
+          return el.value ?? el.getAttribute("value") ?? "";
+        });
+        const value = String(raw).replace(/,/g, "");
+        logger.pass(`Disabled field value → ${name} : "${value}"`);
+        return value;
+      } catch (error: any) {
+        logger.error(`getDisabledFieldValue failed → ${name} → ${error.message}`);
+        throw new Error(`getDisabledFieldValue failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.getDisabledFieldValue (${name})` });
+  }
+
+  // ==========================================================================
+  //  IF CONDITIONS
+  // ==========================================================================
+
+  async ifVisible(
+    selector: string | Locator,
+    thenDo: () => Promise<void>,
+    elseDo?: () => Promise<void>,
+    timeout = 5000
+  ): Promise<void> {
+    const name = this.getElementName(selector);
+    const isVis = await this.getLocator(selector)
+      .waitFor({ state: "visible", timeout })
+      .then(() => true).catch(() => false);
+    logger.debug(`IF visible → ${name} : ${isVis}`);
+    if (isVis) { await thenDo(); } else if (elseDo) { await elseDo(); }
+  }
+
+  async ifNotVisible(
+    selector: string | Locator,
+    thenDo: () => Promise<void>,
+    elseDo?: () => Promise<void>,
+    timeout = 5000
+  ): Promise<void> {
+    const name = this.getElementName(selector);
+    const isVis = await this.getLocator(selector)
+      .waitFor({ state: "visible", timeout })
+      .then(() => true).catch(() => false);
+    logger.debug(`IF not visible → ${name} : ${!isVis}`);
+    if (!isVis) { await thenDo(); } else if (elseDo) { await elseDo(); }
+  }
+
+  async ifEnabled(
+    selector: string | Locator,
+    thenDo: () => Promise<void>,
+    elseDo?: () => Promise<void>
+  ): Promise<void> {
+    const name    = this.getElementName(selector);
+    const enabled = await this.getLocator(selector).first().isEnabled().catch(() => false);
+    logger.debug(`IF enabled → ${name} : ${enabled}`);
+    if (enabled) { await thenDo(); } else if (elseDo) { await elseDo(); }
+  }
+
+  async ifDisabled(
+    selector: string | Locator,
+    thenDo: () => Promise<void>,
+    elseDo?: () => Promise<void>
+  ): Promise<void> {
+    const name     = this.getElementName(selector);
+    const disabled = await this.getLocator(selector).first().isDisabled().catch(() => true);
+    logger.debug(`IF disabled → ${name} : ${disabled}`);
+    if (disabled) { await thenDo(); } else if (elseDo) { await elseDo(); }
+  }
+
+  async ifChecked(
+    selector: string | Locator,
+    thenDo: () => Promise<void>,
+    elseDo?: () => Promise<void>
+  ): Promise<void> {
+    const name    = this.getElementName(selector);
+    const checked = await this.getLocator(selector).first().isChecked().catch(() => false);
+    logger.debug(`IF checked → ${name} : ${checked}`);
+    if (checked) { await thenDo(); } else if (elseDo) { await elseDo(); }
+  }
+
+  async ifUnchecked(
+    selector: string | Locator,
+    thenDo: () => Promise<void>,
+    elseDo?: () => Promise<void>
+  ): Promise<void> {
+    const name    = this.getElementName(selector);
+    const checked = await this.getLocator(selector).first().isChecked().catch(() => false);
+    logger.debug(`IF unchecked → ${name} : ${!checked}`);
+    if (!checked) { await thenDo(); } else if (elseDo) { await elseDo(); }
+  }
+
+  async ifText(
+    selector: string | Locator,
+    op: CompareOp,
+    expected: string | number,
+    thenDo: () => Promise<void>,
+    elseDo?: () => Promise<void>
+  ): Promise<void> {
+    const name   = this.getElementName(selector);
+    const raw    = (await this.getLocator(selector).first().textContent())?.trim() ?? "";
+    const result = this.compare(raw, op, String(expected));
+    logger.debug(`IF text → ${name} "${raw}" ${op} "${expected}" : ${result}`);
+    if (result) { await thenDo(); } else if (elseDo) { await elseDo(); }
+  }
+
+  async ifInputValue(
+    selector: string | Locator,
+    op: CompareOp,
+    expected: string | number,
+    thenDo: () => Promise<void>,
+    elseDo?: () => Promise<void>
+  ): Promise<void> {
+    const name   = this.getElementName(selector);
+    const raw    = await this.getLocator(selector).first().inputValue().catch(() => "");
+    const result = this.compare(raw.trim(), op, String(expected));
+    logger.debug(`IF inputValue → ${name} "${raw}" ${op} "${expected}" : ${result}`);
+    if (result) { await thenDo(); } else if (elseDo) { await elseDo(); }
+  }
+
+  async ifPageContainsText(
+    text: string,
+    thenDo: () => Promise<void>,
+    elseDo?: () => Promise<void>,
+    timeout = 5000
+  ): Promise<void> {
+    const found = await this.page.getByText(text)
+      .waitFor({ state: "visible", timeout })
+      .then(() => true).catch(() => false);
+    logger.debug(`IF page text → "${text}" : ${found}`);
+    if (found) { await thenDo(); } else if (elseDo) { await elseDo(); }
+  }
+
+  async ifPageNotContainsText(
+    text: string,
+    thenDo: () => Promise<void>,
+    elseDo?: () => Promise<void>,
+    timeout = 5000
+  ): Promise<void> {
+    const found = await this.page.getByText(text)
+      .waitFor({ state: "visible", timeout })
+      .then(() => true).catch(() => false);
+    logger.debug(`IF page NOT text → "${text}" : ${!found}`);
+    if (!found) { await thenDo(); } else if (elseDo) { await elseDo(); }
+  }
+
+  async ifPageTitleContains(
+    text: string,
+    thenDo: () => Promise<void>,
+    elseDo?: () => Promise<void>
+  ): Promise<void> {
+    const title = await this.page.title();
+    const match = title.includes(text);
+    logger.debug(`IF title contains → "${text}" in "${title}" : ${match}`);
+    if (match) { await thenDo(); } else if (elseDo) { await elseDo(); }
+  }
+
+  async ifURL(
+    op: CompareOp,
+    expected: string,
+    thenDo: () => Promise<void>,
+    elseDo?: () => Promise<void>
+  ): Promise<void> {
+    const url    = this.page.url();
+    const result = this.compare(url, op, expected);
+    logger.debug(`IF URL → "${url}" ${op} "${expected}" : ${result}`);
+    if (result) { await thenDo(); } else if (elseDo) { await elseDo(); }
+  }
+
+  async ifCount(
+    selector: string | Locator,
+    op: CompareOp,
+    expected: number,
+    thenDo: () => Promise<void>,
+    elseDo?: () => Promise<void>
+  ): Promise<void> {
+    const name   = this.getElementName(selector);
+    const count  = await this.getLocator(selector).count();
+    const result = this.compare(String(count), op, String(expected));
+    logger.debug(`IF count → ${name} : ${count} ${op} ${expected} : ${result}`);
+    if (result) { await thenDo(); } else if (elseDo) { await elseDo(); }
+  }
+
+  async ifEmpty(
+    selector: string | Locator,
+    thenDo: () => Promise<void>,
+    elseDo?: () => Promise<void>
+  ): Promise<void> {
+    const name  = this.getElementName(selector);
+    const value = await this.getLocator(selector).first().inputValue().catch(() => "");
+    const empty = value.trim() === "";
+    logger.debug(`IF empty → ${name} : ${empty}`);
+    if (empty) { await thenDo(); } else if (elseDo) { await elseDo(); }
+  }
+
+  async ifBrowserIs(
+    expected: string,
+    thenDo: () => Promise<void>,
+    elseDo?: () => Promise<void>
+  ): Promise<void> {
+    const browserType = this.page.context().browser()?.browserType().name() ?? "";
+    const match       = browserType.toLowerCase() === expected.toLowerCase();
+    logger.debug(`IF browser → "${browserType}" == "${expected}" : ${match}`);
+    if (match) { await thenDo(); } else if (elseDo) { await elseDo(); }
+  }
+
+  async ifPageLoaded(
+    thenDo: () => Promise<void>,
+    elseDo?: () => Promise<void>,
+    timeout = 10000
+  ): Promise<void> {
+    const loaded = await this.page
+      .waitForLoadState("load", { timeout })
+      .then(() => true).catch(() => false);
+    logger.debug(`IF page loaded : ${loaded}`);
+    if (loaded) { await thenDo(); } else if (elseDo) { await elseDo(); }
+  }
+
+  // ==========================================================================
+  //  WHILE LOOPS
+  // ==========================================================================
+
+  async whileVisible(
+    selector: string | Locator,
+    doAction: () => Promise<void>,
+    maxIterations = 10
+  ): Promise<void> {
+    const name = this.getElementName(selector);
+    let i = 0;
+    while (i < maxIterations) {
+      const visible = await this.getLocator(selector)
+        .waitFor({ state: "visible", timeout: 3000 })
+        .then(() => true).catch(() => false);
+      if (!visible) break;
+      logger.debug(`WHILE visible → ${name} | iteration ${i + 1}`);
+      await doAction();
+      i++;
+    }
+  }
+
+  async whileNotVisible(
+    selector: string | Locator,
+    doAction: () => Promise<void>,
+    maxIterations = 10
+  ): Promise<void> {
+    const name = this.getElementName(selector);
+    let i = 0;
+    while (i < maxIterations) {
+      const visible = await this.getLocator(selector)
+        .waitFor({ state: "visible", timeout: 3000 })
+        .then(() => true).catch(() => false);
+      if (visible) break;
+      logger.debug(`WHILE not visible → ${name} | iteration ${i + 1}`);
+      await doAction();
+      i++;
+    }
+  }
+
+  async whileEnabled(
+    selector: string | Locator,
+    doAction: () => Promise<void>,
+    maxIterations = 10
+  ): Promise<void> {
+    const name = this.getElementName(selector);
+    let i = 0;
+    while (i < maxIterations) {
+      const enabled = await this.getLocator(selector).first().isEnabled().catch(() => false);
+      if (!enabled) break;
+      logger.debug(`WHILE enabled → ${name} | iteration ${i + 1}`);
+      await doAction();
+      i++;
+    }
+  }
+
+  async whileDisabled(
+    selector: string | Locator,
+    doAction: () => Promise<void>,
+    maxIterations = 10
+  ): Promise<void> {
+    const name = this.getElementName(selector);
+    let i = 0;
+    while (i < maxIterations) {
+      const disabled = await this.getLocator(selector).first().isDisabled().catch(() => true);
+      if (!disabled) break;
+      logger.debug(`WHILE disabled → ${name} | iteration ${i + 1}`);
+      await doAction();
+      i++;
+    }
+  }
+
+  async whileValue(
+    count1: number,
+    op: "==" | "!=" | ">" | ">=" | "<" | "<=",
+    count2: number,
+    doAction: () => Promise<void>,
+    maxIterations = 20
+  ): Promise<void> {
+    let i = 0;
+    while (i < maxIterations) {
+      const result = this.compare(String(count1), op, String(count2));
+      if (!result) break;
+      logger.debug(`WHILE value → ${count1} ${op} ${count2} | iteration ${i + 1}`);
+      await doAction();
+      i++;
+    }
+  }
+
+  // ==========================================================================
+  //  RETRY ACTION
+  // ==========================================================================
+
+  async retryAction(
+    action: () => Promise<void>,
+    maxRetries = 3,
+    delayMs = 1000,
+    label = "action"
+  ): Promise<void> {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        await action();
+        logger.pass(`Retry[${attempt}/${maxRetries}] ${label} succeeded`);
+        return;
+      } catch (err: any) {
+        logger.warn(`Retry[${attempt}/${maxRetries}] ${label} failed → ${err.message}`);
+        if (attempt === maxRetries) throw err;
+        await this.page.waitForTimeout(delayMs);
+      }
+    }
+  }
+
+  // ==========================================================================
+  //  STEP LOGGER
+  // ==========================================================================
+
+  resetStepCounter(): void { this._stepCounter = 0; }
+
+  async step(description: string, action: () => Promise<void>): Promise<void> {
+    this._stepCounter++;
+    const start = Date.now();
+    logger.step(`▶ Step ${this._stepCounter} | ${description}`);
+    await action();
+    logger.pass(`✅ Step ${this._stepCounter} done | +${Date.now() - start}ms`);
+  }
+
+  // ==========================================================================
+  //  TOAST HELPERS
+  // ==========================================================================
+
+  async waitForSuccessToast(timeout = 10000): Promise<string> {
+    const loc = this.page.locator(
+      "xpath=//*[contains(@class,'toast') and contains(@class,'success')] | " +
+      "xpath=//*[contains(@class,'alert-success')] | " +
+      "xpath=//*[contains(@class,'notification') and contains(@class,'success')]"
+    );
+    try {
+      await loc.first().waitFor({ state: "visible", timeout });
+      const msg = (await loc.first().textContent())?.trim() ?? "";
+      logger.pass(`Toast success → "${msg}"`);
+      return msg;
+    } catch {
+      logger.warn("No success toast appeared");
+      return "";
+    }
+  }
+
+  async waitForErrorToast(timeout = 10000): Promise<string> {
+    const loc = this.page.locator(
+      "xpath=//*[contains(@class,'toast') and contains(@class,'error')] | " +
+      "xpath=//*[contains(@class,'alert-error')] | " +
+      "xpath=//*[contains(@class,'notification') and contains(@class,'error')]"
+    );
+    try {
+      await loc.first().waitFor({ state: "visible", timeout });
+      const msg = (await loc.first().textContent())?.trim() ?? "";
+      logger.warn(`Toast error → "${msg}"`);
+      return msg;
+    } catch {
+      return "";
+    }
+  }
+
+  // ==========================================================================
+  //  TABLE HELPERS
+  // ==========================================================================
+
+  async getTableRowCount(tableSelector: string | Locator): Promise<number> {
+    const count = await this.getLocator(tableSelector).locator("tr").count();
+    logger.pass(`Table rows → ${count}`);
+    return count;
+  }
+
+  async getTableCellText(
+    tableSelector: string | Locator,
+    rowIndex: number,
+    colIndex: number
+  ): Promise<string> {
+    const text = (await this.getLocator(tableSelector)
+      .locator("tr").nth(rowIndex)
+      .locator("td").nth(colIndex)
+      .textContent())?.trim() ?? "";
+    logger.pass(`Table[${rowIndex}][${colIndex}] → "${text}"`);
+    return text;
+  }
+
+  async clickTableRowByText(tableSelector: string | Locator, searchText: string): Promise<void> {
+    const rows  = this.getLocator(tableSelector).locator("tr");
+    const count = await rows.count();
+    for (let i = 0; i < count; i++) {
+      const rowText = await rows.nth(i).textContent();
+      if (rowText?.includes(searchText)) {
+        await rows.nth(i).click();
+        logger.pass(`Clicked table row containing → "${searchText}"`);
+        return;
+      }
+    }
+    throw new Error(`Table row with text "${searchText}" not found`);
+  }
+
+  // ==========================================================================
+  //  NETWORK RESPONSE CAPTURE
+  // ==========================================================================
+
+  async waitForAPIResponse(
+    urlPattern: string | RegExp,
+    action: () => Promise<void>,
+    timeout = 30000
+  ): Promise<{ status: number; body: any }> {
+    const [response] = await Promise.all([
+      this.page.waitForResponse(
+        (res) => {
+          const url = res.url();
+          return typeof urlPattern === "string"
+            ? url.includes(urlPattern)
+            : urlPattern.test(url);
+        },
+        { timeout }
+      ),
+      action(),
+    ]);
+    const status = response.status();
+    let body: any = {};
+    try { body = await response.json(); } catch { /* not JSON */ }
+    logger.pass(`API response → ${response.url()} | status: ${status}`);
+    return { status, body };
   }
 
   // ==========================================================================
@@ -1173,6 +1705,103 @@ export class BasePage {
     logger.warn(`pause → ${milliseconds}ms`);
     await this.page.waitForTimeout(milliseconds);
     return this;
+  }
+
+  async highlight(selector: string | Locator, color = "red"): Promise<void> {
+    if (process.env.DEBUG !== "true") return;
+    try {
+      await this.getLocator(selector).first().evaluate((el, c) => {
+        (el as HTMLElement).style.outline = `3px solid ${c}`;
+        setTimeout(() => { (el as HTMLElement).style.outline = ""; }, 2000);
+      }, color);
+    } catch { /* ignore */ }
+  }
+  // ==========================================================================
+  //  DATEPICKER HELPER
+  //  Add this inside BasePage class under the MISC section
+  // ==========================================================================
+
+  // ✅ fillDatePicker — handles both dropdown calendar + text input datepickers
+  //
+  // Two types detected automatically:
+  //   Type A — Dropdown calendar (Supplier Invoice Date, Due Date)
+  //            → clicks input → calendar opens → clicks today's circled date
+  //   Type B — Text input (Document Date)
+  //            → fill() sets value directly → Tab commits
+  //
+  // Usage in any POM:
+  //   await this.fillDatePicker(this.supplierInvoiceDate, "10/06/2026");
+  //   await this.fillDatePicker(this.documentDate, "10/06/2026");
+  //   await this.fillDatePicker(this.dueDate, "10/06/2026");
+
+  async fillDatePicker(selector: string | Locator, date: string): Promise<this> {
+    const name    = this.getElementName(selector);
+    const locator = this.getLocator(selector);
+
+    logger.step(`Fill datepicker → ${name} | "${date}"`);
+
+    return ErrorHandler.handle<this>(async () => {
+      try {
+        await locator.first().waitFor({ state: "visible", timeout: 10000 });
+
+        // Step 1: Click to open the datepicker
+        await locator.first().click();
+
+        // Step 2: Check if a calendar popup appeared (dropdown type)
+        const calendarLocator = this.page.locator(
+          "[class*='react-datepicker__month-container'], " +
+          "[class*='datepicker-dropdown'], " +
+          "[class*='calendar-popup']"
+        );
+
+        const calendarOpened = await calendarLocator
+          .waitFor({ state: "visible", timeout: 3000 })
+          .then(() => true)
+          .catch(() => false);
+
+        if (calendarOpened) {
+          // ── Type A: Dropdown calendar ──────────────────────────────────────
+          // Click today's highlighted date cell
+          const todayCell = this.page.locator(
+            "[class*='react-datepicker__day--today']:not([class*='outside']), " +
+            "[class*='react-datepicker__day--selected']"
+          ).first();
+
+          const todayVisible = await todayCell
+            .waitFor({ state: "visible", timeout: 3000 })
+            .then(() => true)
+            .catch(() => false);
+
+          if (todayVisible) {
+            await todayCell.click();
+            logger.pass(`Datepicker (calendar) → ${name} : today selected`);
+          } else {
+            // Fallback: close calendar and try text input
+            await this.page.keyboard.press("Escape");
+            await locator.first().click({ clickCount: 3 });
+            await locator.first().fill(date);
+            await locator.first().press("Enter");
+            logger.pass(`Datepicker (calendar fallback) → ${name} : "${date}"`);
+          }
+
+        } else {
+          // ── Type B: Text input datepicker ─────────────────────────────────
+          // fill() sets value directly without React re-render issue
+          await locator.first().click({ clickCount: 3 }); // select all
+          await locator.first().fill(date);
+          logger.pass(`Datepicker (text input) → ${name} : "${date}"`);
+        }
+
+        // Step 3: Tab to commit value and move to next field
+        await this.page.keyboard.press("Tab");
+
+        return this;
+
+      } catch (error: any) {
+        logger.error(`fillDatePicker failed → ${name} → ${error.message}`);
+        throw new Error(`fillDatePicker failed → ${name} → ${error.message}`);
+      }
+    }, { context: `BasePage.fillDatePicker (${name})` });
   }
 
   // ==========================================================================

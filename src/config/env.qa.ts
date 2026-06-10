@@ -2,12 +2,12 @@ import type { AppConfig } from "./types";
 
 export const qaConfig: AppConfig = {
   env: "qa",
-  baseURL: "https://www.easemytrip.com/",
-  easyURL : "https://www.easemytrip.com/",
+  baseURL: "https://sandbox5101.projectlane.io/spa#/1/home",
+  easyURL : "https://sandbox5101.projectlane.io/spa#/1/home",
 
   credentials: {
-    username: "dummy_user",
-    password: "dummy_password",
+    username: "user2@gm.com",
+    password: "12345",
   },
 
   timeouts: {

@@ -1,5 +1,5 @@
 // ============================================================================
-//  AUTO-HEAL ENGINE v3 — Runtime DOM Recovery + Playwright Smart Healing
+//  AUTO-HEAL ENGINE v4 — Runtime DOM Recovery + Playwright Smart Healing
 // ----------------------------------------------------------------------------
 //  FLOW:
 //    Primary → getByRole → getByLabel → getByPlaceholder → getByText
@@ -77,17 +77,17 @@ const STRATEGY_CONFIDENCE: Record<Exclude<HealStrategy, "primary">, number> = {
   position:         0.25,
 };
 
-// ── Timeouts per strategy (ms) ────────────────────────────────────────────────
+// ✅ Increased timeouts — ERP apps are slow, 800ms not enough
 const STRATEGY_TIMEOUT: Record<Exclude<HealStrategy, "primary">, number> = {
-  getByRole:        800,
-  getByLabel:       800,
-  getByPlaceholder: 800,
-  getByText:        800,
-  css:              1000,
-  xpath:            1200,
-  dom:              1500,
-  "relative-xpath": 1500,
-  position:         1500,
+  getByRole:        2000,
+  getByLabel:       2000,
+  getByPlaceholder: 2000,
+  getByText:        2000,
+  css:              2000,
+  xpath:            2500,
+  dom:              2500,
+  "relative-xpath": 2500,
+  position:         2500,
 };
 
 const ROLE_BY_TAG: Record<string, PlaywrightRole> = {
@@ -112,15 +112,13 @@ const INPUT_ROLE_BY_TYPE: Record<string, PlaywrightRole> = {
 };
 
 const SCORED_ATTRS    = ["id", "name", "placeholder", "aria-label", "title", "class", "type"];
-const MAX_HINT_LENGTH = 80;
+const MAX_HINT_LENGTH = 120;  // ✅ Increased from 80 — more context kept
 const DOM_MIN_SCORE   = 0.45;
 
 // ============================================================================
 //  VISIBILITY
 // ============================================================================
-
-// Always use .first() — if multiple elements match, take the first one
-async function isVisible(locator: Locator, timeout = 1500): Promise<boolean> {
+async function isVisible(locator: Locator, timeout = 2000): Promise<boolean> {
   try {
     await locator.first().waitFor({ state: "visible", timeout });
     return true;
@@ -475,7 +473,6 @@ async function buildDomRecoveryAttempts(
 
   logger.debug(`[AutoHeal] DOM scan: ${ranked.length} candidates for <${hints.tag}>`);
 
-  // Take top 3 — always .first() applied later in main loop
   return ranked.slice(0, 3).map(candidate => {
     let preciseLocator: Locator;
     let preciseSelector: string;
@@ -525,7 +522,6 @@ async function buildPositionAttempts(
   if (!hints.lastKnownBounds || !hints.tag) return [];
 
   const bounds = hints.lastKnownBounds;
-  logger.debug(`[AutoHeal] Position — looking near x:${bounds.x} y:${bounds.y}`);
 
   try {
     if (page.isClosed()) return [];
@@ -721,7 +717,6 @@ async function buildRelativeXPathAttempts(
         break;
     }
 
-    // Parent axis
     for (const text of hints.texts) {
       expressions.push(
         { xpath: `xpath=//*[normalize-space()="${xpathString(text)}"]/parent::${targetTag}`,      label: `parent of "${text}"` },
@@ -798,6 +793,58 @@ function buildHealingAttempts(page: Page, hints: RuntimeHints): HealingAttempt[]
 }
 
 // ============================================================================
+//  ✅ IMPROVED LOG HELPER — clean, structured, easy to read
+// ============================================================================
+function formatHealHeader(hints: RuntimeHints, total: number): string {
+  const original = hints.selector ?? hints.raw.substring(0, 120);
+  const tag      = hints.tag      ? `<${hints.tag}>` : "<unknown>";
+  const texts    = hints.texts.length > 0 ? `"${hints.texts[0]}"` : "—";
+  return (
+    `\n┌─ [AutoHeal] Primary not visible ─────────────────────────────\n` +
+    `│  Original  : ${original}\n` +
+    `│  Tag       : ${tag}\n` +
+    `│  Text hint : ${texts}\n` +
+    `│  Strategies: ${total} attempts queued\n` +
+    `└───────────────────────────────────────────────────────────────`
+  );
+}
+
+function formatHealMiss(strategy: string, selector: string, elapsed: number): string {
+  const clean = selector.replace(/\s+/g, " ").substring(0, 120);
+  return `  ✗ [${strategy.padEnd(16)}] ${clean}  (+${elapsed}ms)`;
+}
+
+function formatHealHit(
+  strategy:   string,
+  selector:   string,
+  confidence: number,
+  elapsed:    number
+): string {
+  const clean    = selector.split("  [")[0].split(" (")[0];
+  const relation = selector.includes("  [") ? `\n  │  Relation : ${selector.split("  [")[1]?.replace("]", "")}` : "";
+  return (
+    `\n┌─ [AutoHeal] ✅ HEALED ────────────────────────────────────────\n` +
+    `│  Strategy  : ${strategy} (${(confidence * 100).toFixed(0)}% confidence)\n` +
+    `│  Selector  : ${clean}${relation}\n` +
+    `│  Time      : +${elapsed}ms\n` +
+    `│  💡 UPDATE POM → ${clean}\n` +
+    `└───────────────────────────────────────────────────────────────`
+  );
+}
+
+function formatHealFail(hints: RuntimeHints, total: number, elapsed: number): string {
+  return (
+    `\n┌─ [AutoHeal] ❌ FAILED — all ${total} strategies exhausted ────\n` +
+    `│  Original  : ${hints.selector ?? hints.raw.substring(0, 120)}\n` +
+    `│  Tag       : ${hints.tag ?? "unknown"}\n` +
+    `│  Texts     : [${hints.texts.join(", ")}]\n` +
+    `│  Label     : ${hints.label ?? "none"}\n` +
+    `│  Time      : +${elapsed}ms\n` +
+    `└───────────────────────────────────────────────────────────────`
+  );
+}
+
+// ============================================================================
 //  MAIN
 // ============================================================================
 export async function autoHeal(
@@ -806,8 +853,10 @@ export async function autoHeal(
   timeoutOverride?: number
 ): Promise<HealResult> {
 
-  // ── Primary ───────────────────────────────────────────────────────────────
-  if (await isVisible(locator, timeoutOverride ?? 3000)) {
+  const startTime = Date.now();
+
+  // ── Primary check ─────────────────────────────────────────────────────────
+  if (await isVisible(locator, timeoutOverride ?? 5000)) {
     return { locator: locator.first(), healed: false, strategy: "primary", confidence: 1.0 };
   }
 
@@ -828,35 +877,27 @@ export async function autoHeal(
 
   const attempts = [...standard, ...domBased, ...relative, ...position];
 
-  logger.warn(
-    `[AutoHeal] Primary not visible — ` +
-    `${standard.length} standard + ${domBased.length} DOM + ` +
-    `${relative.length} relative + ${position.length} position = ` +
-    `${attempts.length} total → ${hints.raw}`
-  );
+  // ✅ Clean structured header log
+  logger.warn(formatHealHeader(hints, attempts.length));
 
-  // ── Try each strategy — always use .first() if multiple elements match ────
+  // ── Try each strategy ─────────────────────────────────────────────────────
   for (const attempt of attempts) {
-    const timeout = STRATEGY_TIMEOUT[attempt.strategy] ?? 1200;
-
-    const visible = await isVisible(attempt.locator, timeout);
+    const attemptStart = Date.now();
+    const timeout      = STRATEGY_TIMEOUT[attempt.strategy] ?? 2000;
+    const visible      = await isVisible(attempt.locator, timeout);
+    const elapsed      = Date.now() - attemptStart;
 
     if (!visible) {
-      logger.debug(`[AutoHeal] [${attempt.strategy}] no match → ${attempt.selector.substring(0, 80)}`);
+      // ✅ Clean miss log — one line per attempt, easy to scan
+      logger.debug(formatHealMiss(attempt.strategy, attempt.selector, elapsed));
       continue;
     }
 
-    // Multiple elements may match — always take .first()
-    const resolved = attempt.locator.first();
+    const resolved     = attempt.locator.first();
+    const totalElapsed = Date.now() - startTime;
 
-    logger.pass(
-      `[AutoHeal] ✅ Healed via [${attempt.strategy}] confidence: ${(attempt.confidence * 100).toFixed(0)}%\n` +
-      `  Selector : ${attempt.selector.split("  [")[0]}\n` +
-      (attempt.strategy === "relative-xpath"
-        ? `  Relation : ${attempt.selector.split("  [")[1]?.replace("]", "")}\n`
-        : "") +
-      `  💡 UPDATE YOUR POM → ${attempt.selector.split(" (")[0].split("  [")[0]}`
-    );
+    // ✅ Clean success log — boxed, stands out clearly
+    logger.pass(formatHealHit(attempt.strategy, attempt.selector, attempt.confidence, totalElapsed));
 
     return {
       locator:    resolved,
@@ -867,11 +908,9 @@ export async function autoHeal(
     };
   }
 
-  logger.error(
-    `[AutoHeal] ❌ All ${attempts.length} strategies failed\n` +
-    `  Original : ${hints.raw}\n` +
-    `  Tag: ${hints.tag ?? "unknown"} | Texts: [${hints.texts.join(", ")}] | Label: ${hints.label ?? "none"}`
-  );
+  // ✅ Clean fail log — all context in one block
+  const totalElapsed = Date.now() - startTime;
+  logger.error(formatHealFail(hints, attempts.length, totalElapsed));
 
   return { locator, healed: false, strategy: "primary", confidence: 0 };
 }

@@ -1,28 +1,68 @@
 // ============================================================================
-//  set() — Test Data Utility
+//  set() — Test Data Utility v2
 // ----------------------------------------------------------------------------
-//  Simple way to load test data from JSON files.
-//
 //  USAGE:
 //  import { set, sets, override, merge } from "@utils/set";
 //
-//  const data = set("hotelData", 1);     // Get Set 1
-//  const data = set("hotelData", 2);     // Get Set 2
-//  const all  = sets("hotelData");       // Get all sets
-//  const data = override("hotelData", 1, { city: "Pune" }); // Override field
-//  const data = merge(["hotelData",1], ["userProfile",1]);   // Merge two files
+//  const data = set("purchaseOrderData", 1);     // Get Set 1
+//  const data = set("purchaseOrderData", "Set 2"); // Get by name
+//  const all  = sets("purchaseOrderData");        // Get all enabled sets
 // ============================================================================
 
 import * as fs   from "fs";
 import * as path from "path";
 
-const DATA_DIR = path.join(process.cwd(), "test-data", "ui");
+// ✅ FIX — find project root reliably on Windows + Mac + CI
+// Walks UP from this file until it finds playwright.config.ts
+function findProjectRoot(): string {
+  let dir = __dirname;
+  for (let i = 0; i < 10; i++) {
+    if (
+      fs.existsSync(path.join(dir, "playwright.config.ts")) ||
+      fs.existsSync(path.join(dir, "playwright.config.js")) ||
+      fs.existsSync(path.join(dir, "package.json"))
+    ) {
+      return dir;
+    }
+    dir = path.dirname(dir);
+  }
+  // Fallback to process.cwd()
+  return process.cwd();
+}
 
-// Cache loaded files so they are not read from disk on every call
+const PROJECT_ROOT = findProjectRoot();
+const DATA_DIR     = path.join(PROJECT_ROOT, "test-data", "ui");
+
+// ✅ Debug log — shows exactly where it's looking
+console.log(`[set] Project root : ${PROJECT_ROOT}`);
+console.log(`[set] Data dir     : ${DATA_DIR}`);
+
+// Cache loaded files
 const fileCache = new Map<string, Record<string, unknown>[]>();
 
 // ============================================================================
-//  INTERNAL — load sets from JSON file + merge env overrides
+//  INTERNAL — auto-create template if file does not exist
+// ============================================================================
+function createTemplateFile(fileName: string, baseFile: string): void {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    console.log(`[set] Created directory: ${DATA_DIR}`);
+  }
+
+  const template = {
+    profile: `${fileName} Profile`,
+    sets: [
+      { setName: "Set 1", description: "Fill in your values", enabled: true },
+      { setName: "Set 2", description: "Fill in your values", enabled: true }
+    ]
+  };
+
+  fs.writeFileSync(baseFile, JSON.stringify(template, null, 2), "utf-8");
+  console.log(`[set] ✅ Auto-created: ${baseFile}`);
+}
+
+// ============================================================================
+//  INTERNAL — load and parse JSON file
 // ============================================================================
 function loadSets(fileName: string): Record<string, unknown>[] {
   if (fileCache.has(fileName)) return fileCache.get(fileName)!;
@@ -31,27 +71,49 @@ function loadSets(fileName: string): Record<string, unknown>[] {
   const baseFile = path.join(DATA_DIR, `${fileName}.json`);
   const envFile  = path.join(DATA_DIR, `${fileName}.${env}.json`);
 
-  // Check base file exists
+  // ✅ Show exact path being loaded — easy to debug
+  console.log(`[set] Loading → ${baseFile}`);
+  console.log(`[set] File exists: ${fs.existsSync(baseFile)}`);
+
   if (!fs.existsSync(baseFile)) {
+    createTemplateFile(fileName, baseFile);
+  }
+
+  // ✅ Parse with clear error if JSON is malformed
+  let raw: any;
+  try {
+    const content = fs.readFileSync(baseFile, "utf-8");
+    console.log(`[set] File content preview → ${content.substring(0, 100)}...`);
+    raw = JSON.parse(content);
+  } catch (err: any) {
     throw new Error(
-      `[set] File not found: ${baseFile}\n` +
-      `Create the file at: test-data/ui/${fileName}.json`
+      `[set] Failed to parse ${baseFile}\n` +
+      `Error: ${err.message}\n` +
+      `Check the file for syntax errors (trailing commas, missing quotes etc.)`
     );
   }
 
-  // Load base file
-  const raw = JSON.parse(fs.readFileSync(baseFile, "utf-8"));
-  let loaded: Record<string, unknown>[] = Array.isArray(raw)
-    ? raw
-    : Array.isArray(raw.sets) ? raw.sets : [];
+  // ✅ Handle both array format and { sets: [] } format
+  let loaded: Record<string, unknown>[];
+  if (Array.isArray(raw)) {
+    loaded = raw;
+  } else if (Array.isArray(raw.sets)) {
+    loaded = raw.sets;
+  } else {
+    throw new Error(
+      `[set] Invalid format in ${fileName}.json\n` +
+      `Expected: { "sets": [...] } or [...]\n` +
+      `Got: ${JSON.stringify(raw).substring(0, 100)}`
+    );
+  }
 
-  // Merge env-specific overrides if file exists
-  // e.g. hotelData.qa.json overrides hotelData.json when ENVIRONMENT=qa
+  console.log(`[set] Total sets found : ${loaded.length}`);
+
+  // Apply env-specific overrides if file exists
   if (fs.existsSync(envFile)) {
     const envRaw  = JSON.parse(fs.readFileSync(envFile, "utf-8"));
     const envSets: Record<string, unknown>[] = Array.isArray(envRaw)
-      ? envRaw
-      : Array.isArray(envRaw.sets) ? envRaw.sets : [];
+      ? envRaw : Array.isArray(envRaw.sets) ? envRaw.sets : [];
 
     loaded = loaded.map(base => {
       const envMatch = envSets.find(
@@ -63,22 +125,17 @@ function loadSets(fileName: string): Record<string, unknown>[] {
     console.log(`[set] Env overrides applied: ${fileName}.${env}.json`);
   }
 
-  // Skip sets where enabled = false (ETF toggle)
+  // Filter disabled sets
   const active = loaded.filter(s => s.enabled !== false);
+  console.log(`[set] Enabled sets  : ${active.length}`);
+  active.forEach((s, i) => console.log(`  ${i + 1}. ${s.setName}`));
+
   fileCache.set(fileName, active);
   return active;
 }
 
 // ============================================================================
-//  set() — Get one set by index (1-based) or by name
-// ----------------------------------------------------------------------------
-//  @param fileName  file name without .json  e.g. "hotelData"
-//  @param setRef    1-based index OR set name string
-//
-//  @example
-//  const data = set("hotelData", 1);          // Set 1
-//  const data = set("hotelData", 2);          // Set 2
-//  const data = set("hotelData", "Set 3");    // by name
+//  set() — Get one set by 1-based index or name
 // ============================================================================
 export function set(fileName: string, setRef: number | string): any {
   const allSets = loadSets(fileName);
@@ -86,11 +143,13 @@ export function set(fileName: string, setRef: number | string): any {
   if (typeof setRef === "number") {
     if (setRef < 1 || setRef > allSets.length) {
       throw new Error(
-        `[set] Index ${setRef} out of range. ` +
-        `"${fileName}" has ${allSets.length} set(s).`
+        `[set] Index ${setRef} out of range.\n` +
+        `"${fileName}" has ${allSets.length} enabled set(s).`
       );
     }
-    return allSets[setRef - 1];
+    const result = allSets[setRef - 1];
+    console.log(`[set] set("${fileName}", ${setRef}) →`, JSON.stringify(result));
+    return result;
   }
 
   const match = allSets.find(
@@ -101,43 +160,23 @@ export function set(fileName: string, setRef: number | string): any {
     const available = allSets.map(s => s.setName).join(", ");
     throw new Error(
       `[set] "${setRef}" not found in "${fileName}".\n` +
-      `Available sets: ${available}`
+      `Available: ${available}`
     );
   }
 
+  console.log(`[set] set("${fileName}", "${setRef}") →`, JSON.stringify(match));
   return match;
 }
 
 // ============================================================================
-//  sets() — Get ALL sets as array
-// ----------------------------------------------------------------------------
-//  Use with test.each to run one test per set automatically.
-//
-//  @example
-//  test.each(sets("hotelData"))("Hotel — $setName", async (data) => {
-//    await hotelPage.hotelBookingPage(data.city);
-//  });
+//  sets() — Get ALL enabled sets
 // ============================================================================
 export function sets(fileName: string): any[] {
   return loadSets(fileName);
 }
 
 // ============================================================================
-//  override() — Get set with one or more fields overridden
-// ----------------------------------------------------------------------------
-//  @param overrides  plain object with fields to override
-//
-//  @example
-//  const data = override("hotelData", 1, { city: "Pune" });
-//  // data.city   = "Pune"  ← overridden
-//  // data.adults = 2       ← from JSON Set 1
-//
-//  // Override with runtime variable
-//  const cityFromAPI = await api.getCity();
-//  const data = override("hotelData", 1, { city: cityFromAPI });
-//
-//  // Override multiple fields
-//  const data = override("hotelData", 1, { city: "Pune", adults: 3 });
+//  override() — Get set with fields overridden
 // ============================================================================
 export function override(
   fileName:  string,
@@ -146,22 +185,12 @@ export function override(
 ): any {
   const base   = set(fileName, setRef);
   const merged = { ...base, ...overrides };
-
-  console.log(`[set] "${fileName}" Set ${setRef} — overrides:`, overrides);
-
+  console.log(`[set] override applied:`, overrides);
   return merged;
 }
 
 // ============================================================================
-//  merge() — Combine fields from multiple JSON files into one object
-// ----------------------------------------------------------------------------
-//  Useful when one test needs data from multiple profiles.
-//
-//  @example
-//  const data = merge(["hotelData", 1], ["userProfile", 1]);
-//  // data.city       ← from hotelData Set 1
-//  // data.firstName  ← from userProfile Set 1
-//  // data.email      ← from userProfile Set 1
+//  merge() — Combine fields from multiple JSON files
 // ============================================================================
 export function merge(
   ...sources: Array<[fileName: string, setRef: number | string]>
